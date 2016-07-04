@@ -4,6 +4,9 @@ DEBUG_FLAGS = -g
 CSTD = c11
 CFLAGS = -O0 -pipe -fblocks
 LDADD += -lm -lpthread -lBlocksRuntime
+
+DESTDIR = /usr/local
+BINDIR = /sbin
 MAN =
 
 .include <bsd.prog.mk>

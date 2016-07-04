@@ -2,25 +2,67 @@
 
 The Network Block Device is a Linux-originated lightweight block access
 protocol that allows one to export a block device to a client.  This client
-is designed to run on top of FreeBSD's GEOM gate device driver.
+is designed to run on top of FreeBSD's GEOM Gate device driver, keeping the
+network client in a userland daemon rather than in a kernel module.
 
 ## Caveats
 
-* Only the fixed newstyle NBD handshake is supported.
+* Only the fixed newstyle NBD handshake is supported.  Support for older
+  protocol versions is not planned.
 * TLS and other extensions are not currently supported.
 * Only the default (unnamed) export on the default port (10809) is used.
-
-These limitations will likely be fixed in future revisions.
+* Management of the device nodes is not yet handled by this utility.
 
 ## Usage Example
 
-`nbd-client 192.168.1.101`
+Connect to an NBD server and print the name of the new device on stdout:
 
-This connects to an NBD server and will print the name of the device
-created on stdout.  You can then use this device as a regular disk device,
-for example:
+```
+nbd-client 192.168.1.101
+```
 
-`zpool create foo ggate0`
+You can then use this device as a regular disk device.  For example, create
+a ZFS pool named `foo` backed by the NBD storage attached to `ggate0`.
+
+```
+zpool create foo ggate0
+```
+
+Use the `ggatec` utility to list all attached GEOM Gate devices.  These may
+not all be NBD devices:
+
+```
+ggatec list
+```
+
+Use the `ggatec` utility to force removal of the GEOM Gate device unit `0`,
+which corresponds to the device named `ggate0`:
+
+```
+ggatec destroy -f -u 0
+```
+
+## Compiling
+
+```
+make
+make install # (optional)
+```
+
+Note: This project expects to be compiled with BSD make, not GNU make.
+
+## To Do
+
+* specify export
+* list exports (work started)
+* connect to multiple/all exports on a server (spawn a thread per export?)
+* configuration file
+* rc script
+* capsicum, dropping to a less privileged user
+
+## Bugs
+
+Please report them along with steps to reproduce.
 
 ## Motivation
 
@@ -28,12 +70,6 @@ Scaleway offers high-density dedicated servers using NBD to attach storage
 to each machine.  FreeBSD lacks an NBD client, so Scaleway does not support
 FreeBSD.  This project aims to implement an NBD client so that Scaleway can
 offer FreeBSD on their servers.
-
-## Compiling
-
-`make`
-
-Note: This project expects to be compiled with BSD make, not GNU make.
 
 ## License
 
