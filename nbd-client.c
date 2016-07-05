@@ -7,6 +7,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
+#include <netdb.h>
 #include <assert.h>
 #include <errno.h>
 #include <err.h>
@@ -134,28 +135,27 @@ nbd_client_set_disconnect(struct nbd_client *client, bool disconnect)
 
 int
 nbd_client_connect(struct nbd_client *client, char const *address,
-		   uint16_t port)
+		   char const *port)
 {
-	struct sockaddr_in sa;
+	struct addrinfo *ai;
 	int sock;
 
 	sock = client->sock;
 
-	memset(&sa, 0, sizeof sa);
-
-	sa.sin_family = AF_INET;
-	sa.sin_port = htons(port);
-	if (inet_pton(AF_INET, address, &sa.sin_addr) != 1) {
-		warn("%s: failed to parse ipv4 address (%s)",
+	if (getaddrinfo(address, port, NULL, &ai) != SUCCESS) {
+		warn("%s: failed to locate server (%s)",
 		     __func__, address);
 		return NBD_CLIENT_CONNECT_ERROR_USAGE;
 	}
 
-	if (connect(sock, (struct sockaddr *)&sa, sizeof sa) == -1) {
-		warn("%s: failed to connect to remote server (%s:%u)",
+	if (connect(sock, ai->ai_addr, sizeof *ai->ai_addr) == FAILURE) {
+		warn("%s: failed to connect to remote server (%s:%s)",
 		     __func__, address, port);
+		freeaddrinfo(ai);
 		return NBD_CLIENT_CONNECT_ERROR_CONNECT;
 	}
+
+	freeaddrinfo(ai);
 
 	return NBD_CLIENT_CONNECT_OK;
 }

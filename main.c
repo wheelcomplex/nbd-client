@@ -42,7 +42,7 @@ static void
 usage()
 {
 
-	fprintf(stderr, "usage: %s address\n", getprogname());
+	fprintf(stderr, "usage: %s host [port]\n", getprogname());
 }
 
 static volatile sig_atomic_t disconnect = 0;
@@ -201,7 +201,7 @@ main(int argc, char *argv[])
 {
 	ggate_context_t ggate;
 	nbd_client_t nbd;
-	char const *host;
+	char const *host, *port;
 	uint64_t size;
 	int retval;
 
@@ -214,12 +214,16 @@ main(int argc, char *argv[])
 	 * geom_gate module is loaded.
 	 */
 	
-	if (argc != 2) {
+	if (argc < 2 || argc > 3) {
 		usage();
 		return EXIT_FAILURE;
 	}
 
 	host = argv[1];
+	if (argc == 2)
+		port = NBD_DEFAULT_PORT;
+	else
+		port = argv[2];
 
 	if (ggate_load_module() == FAILURE)
 		return EXIT_FAILURE;
@@ -252,7 +256,7 @@ main(int argc, char *argv[])
 	 * Connect to the nbd server.
 	 */
 	
-	switch (nbd_client_connect(nbd, host, NBD_DEFAULT_PORT)) {
+	switch (nbd_client_connect(nbd, host, port)) {
 
 	case NBD_CLIENT_CONNECT_ERROR_USAGE:
 		usage();

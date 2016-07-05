@@ -8,7 +8,7 @@
  ** Network protocol header structs and values
  **/
 
-#define NBD_DEFAULT_PORT 10809
+#define NBD_DEFAULT_PORT "10809"
 
 /*
  * Negotiation handshake

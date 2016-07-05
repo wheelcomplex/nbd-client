@@ -24,7 +24,7 @@ enum {
 };
 
 int nbd_client_connect(nbd_client_t client, char const *address,
-		       uint16_t port);
+		       char const *port);
 void nbd_client_shutdown(nbd_client_t client);
 
 int nbd_client_list(nbd_client_t client);

@@ -137,7 +137,7 @@ g_gate_ctl_create_dump(struct g_gate_ctl_create *ggioc)
 
 int
 ggate_context_create_device(struct ggate_context *ctx, char const *host,
-			    uint16_t port, char const *path,
+			    char const *port, char const *path,
 			    off_t mediasize, uint32_t sectorsize,
 			    uint32_t flags)
 {
@@ -157,7 +157,7 @@ ggate_context_create_device(struct ggate_context *ctx, char const *host,
 	};
 
 	snprintf(ggioc.gctl_info, sizeof ggioc.gctl_info,
-		 "%s:%u %s (nbd)", host, port, path);
+		 "%s:%s %s (nbd)", host, port, path);
 
 	if (ggate_context_ioctl(ctx, G_GATE_CMD_CREATE, &ggioc) == FAILURE) {
 		warnx("%s: failed to create ggate device", __func__);

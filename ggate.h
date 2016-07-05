@@ -25,7 +25,7 @@ int ggate_context_get_unit(ggate_context_t ctx);
 int ggate_context_ioctl(ggate_context_t ctx, uint64_t req, void *data);
 
 int ggate_context_create_device(ggate_context_t ctx, char const *host,
-				uint16_t port, char const *path,
+				char const *port, char const *path,
 				off_t mediasize, uint32_t sectorsize,
 				uint32_t flags);
 int ggate_context_destroy_device(ggate_context_t ctx, bool force);

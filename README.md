@@ -10,8 +10,9 @@ network client in a userland daemon rather than in a kernel module.
 * Only the fixed newstyle NBD handshake is supported.  Support for older
   protocol versions is not planned.
 * TLS and other extensions are not currently supported.
-* Only the default (unnamed) export on the default port (10809) is used.
-* Management of the device nodes is not yet handled by this utility.
+* Only the default (unnamed) export is used.
+* Manual control (listing, naming, numbering, removal) of the device nodes
+  is not yet provided by this tool.
 
 ## Usage Example
 
@@ -19,6 +20,12 @@ Connect to an NBD server and print the name of the new device on stdout:
 
 ```
 nbd-client 192.168.1.101
+```
+
+Connect specifying a hostname and port number:
+
+```
+nbd-client nbd.storage.internal-domain.net 10809
 ```
 
 You can then use this device as a regular disk device.  For example, create
@@ -53,7 +60,7 @@ Note: This project expects to be compiled with BSD make, not GNU make.
 
 ## To Do
 
-* specify export
+* specify named export
 * list exports (work started)
 * connect to multiple/all exports on a server (spawn a thread per export?)
 * configuration file
