@@ -7,8 +7,6 @@ network client in a userland daemon rather than in a kernel module.
 
 ## Caveats
 
-* Only the fixed newstyle NBD handshake is supported.  Support for older
-  protocol versions is in progress.
 * TLS and other extensions are not currently supported.
 * Only the default (unnamed) export is used.
 * Manual control (listing, naming, numbering, removal) of the device nodes
