@@ -1,6 +1,6 @@
 #include <sys/cdefs.h>
-#include <sys/endian.h>
 #include <sys/param.h>
+#include <sys/endian.h>
 #include <sys/socket.h>
 #include <sys/syslimits.h>
 #include <sys/types.h>
@@ -133,6 +133,13 @@ nbd_client_set_disconnect(struct nbd_client *client, bool disconnect)
 	client->disconnect = disconnect;
 }
 
+void
+nbd_client_disable_trim(struct nbd_client *client)
+{
+
+	client->flags &= ~NBD_FLAG_SEND_TRIM;
+}
+
 int
 nbd_client_connect(struct nbd_client *client, char const *address,
 		   char const *port)
@@ -167,8 +174,160 @@ nbd_client_shutdown(struct nbd_client *client)
 	shutdown(client->sock, SHUT_RDWR);
 }
 
+static inline char const *
+nbd_client_flag_string(uint32_t flag)
+{
+
+	switch (flag) {
+
+#define CASE_MESSAGE(c) case c: return #c
+
+		CASE_MESSAGE(NBD_FLAG_HAS_FLAGS);
+		CASE_MESSAGE(NBD_FLAG_READ_ONLY);
+		CASE_MESSAGE(NBD_FLAG_SEND_FLUSH);
+		CASE_MESSAGE(NBD_FLAG_SEND_FUA);
+		CASE_MESSAGE(NBD_FLAG_ROTATIONAL);
+		CASE_MESSAGE(NBD_FLAG_SEND_TRIM);
+
+#undef CASE_MESSAGE
+
+	default: return NULL;
+	}
+}
+
 static inline void
-nbd_negotiation_ntoh(struct nbd_negotiation *handshake)
+nbd_client_dump(struct nbd_client *client)
+{
+	const uint32_t Flags[] = {
+		NBD_FLAG_HAS_FLAGS, NBD_FLAG_READ_ONLY, NBD_FLAG_SEND_FLUSH,
+		NBD_FLAG_SEND_FUA, NBD_FLAG_ROTATIONAL, NBD_FLAG_SEND_TRIM,
+	};
+	const size_t FlagsLen = sizeof Flags / sizeof Flags[0];
+
+	uint32_t flags;
+	size_t i;
+
+	fprintf(stderr, "\tsock: %d\n", client->sock);
+	fprintf(stderr, "\tdisconnect: %s\n",
+		client->disconnect ? "true" : "false");
+	flags = client->flags;
+	fprintf(stderr, "\tflags: %#010x [", flags);
+	i = FlagsLen;
+	while (i--) {
+		char const *name;
+		uint32_t value;
+		bool match, last;
+
+		value = Flags[i];
+		name = nbd_client_flag_string(value);
+		match = (flags & value) != 0;
+		last = i > 0;
+
+		assert(name != NULL);
+
+		fprintf(stderr, "%s%s", match ? name : "",
+			last ? (match ? "|" : "") : "]\n");
+	}
+	fprintf(stderr, "\tsize: %lu\n", client->size);
+}
+
+static inline void
+nbd_oldstyle_negotiation_ntoh(struct nbd_oldstyle_negotiation *handshake)
+{
+
+	handshake->magic = be64toh(handshake->magic);
+	handshake->oldstyle_magic = be64toh(handshake->oldstyle_magic);
+	handshake->size = be64toh(handshake->size);
+	handshake->flags = be32toh(handshake->flags);
+}
+
+static inline bool
+nbd_oldstyle_negotiation_is_valid(struct nbd_oldstyle_negotiation *handshake)
+{
+
+	if (handshake->magic != NBD_MAGIC) {
+		warnx("%s: invalid magic: %#018lx (expected %#018lx)",
+		      __func__, handshake->magic, NBD_MAGIC);
+		return false;
+	}
+	if (handshake->oldstyle_magic != NBD_OLDSTYLE_MAGIC) {
+		warnx("%s: invalid oldstyle magic: %#018lx (expected %#018lx)",
+		      __func__, handshake->oldstyle_magic, NBD_OLDSTYLE_MAGIC);
+		return false;
+	}
+	if (!(handshake->flags & NBD_FLAG_HAS_FLAGS)) {
+		warnx("%s: invalid flags: %#010x (expected low bit set)",
+		      __func__, handshake->flags);
+		return false;
+	}
+
+	return true;
+}
+	
+static inline void
+nbd_oldstyle_negotiation_dump(struct nbd_oldstyle_negotiation *handshake)
+{
+	uint32_t flags = handshake->flags;
+	
+	fprintf(stderr, "\tmagic: %#018lx\n", handshake->magic);
+	fprintf(stderr, "\toldstyle_magic: %#018lx\n",
+		handshake->oldstyle_magic);
+	fprintf(stderr, "\tsize: %lu\n", handshake->size);
+	fprintf(stderr, "\tflags: %#010x", flags);
+	if (!(flags & NBD_FLAG_HAS_FLAGS))
+		fprintf(stderr, " (invalid)");
+	fprintf(stderr, "\n");
+}
+
+static int
+nbd_client_oldstyle_handshake(struct nbd_client *client)
+{
+	struct nbd_oldstyle_negotiation handshake;
+	ssize_t len;
+	int sock;
+
+	sock = client->sock;
+
+	while (true) {
+		len = recv(sock, &handshake, sizeof handshake, MSG_WAITALL);
+		if (client->disconnect)
+			return FAILURE;
+		if (len == -1 && errno == EINTR)
+			continue;
+		if (len != sizeof handshake) {
+			warn("%s: connection failed", __func__);
+			return FAILURE;
+		}
+		break;
+	}
+
+	nbd_oldstyle_negotiation_ntoh(&handshake);
+
+	//fprintf(stderr, "%s: negotiation:\n", __func__);
+	//nbd_oldstyle_negotiation_dump(&handshake);
+	
+	if (!nbd_oldstyle_negotiation_is_valid(&handshake)) {
+		warnx("%s: invalid handshake:", __func__);
+		nbd_oldstyle_negotiation_dump(&handshake);
+		return FAILURE;
+	}
+
+	client->size = handshake.size;
+	client->flags = handshake.flags;
+
+	//fprintf(stderr, "%s: client:\n", __func__);
+	//nbd_client_dump(client);
+	
+	if (!(handshake.flags & NBD_FLAG_SEND_FLUSH))
+		warnx("%s: server does not support FLUSH command", __func__);
+	if (!(handshake.flags & NBD_FLAG_SEND_TRIM))
+		warnx("%s: server does not support TRIM command", __func__);
+
+	return SUCCESS;
+}
+
+static inline void
+nbd_newstyle_negotiation_ntoh(struct nbd_newstyle_negotiation *handshake)
 {
 
 	handshake->magic = be64toh(handshake->magic);
@@ -176,10 +335,10 @@ nbd_negotiation_ntoh(struct nbd_negotiation *handshake)
 	handshake->handshake_flags = be16toh(handshake->handshake_flags);
 }
 
-#define VALID_HANDSHAKE_FLAGS (NBD_FLAG_FIXED_NEWSTYLE|NBD_FLAG_NO_ZEROES)
+#define VALID_NEWSTYLE_FLAGS (NBD_FLAG_FIXED_NEWSTYLE|NBD_FLAG_NO_ZEROES)
 
 static inline bool
-nbd_negotiation_is_valid(struct nbd_negotiation *handshake)
+nbd_newstyle_negotiation_is_valid(struct nbd_newstyle_negotiation *handshake)
 {
 	uint16_t flags = handshake->handshake_flags;
 
@@ -193,7 +352,7 @@ nbd_negotiation_is_valid(struct nbd_negotiation *handshake)
 		      __func__, handshake->newstyle_magic, NBD_NEWSTYLE_MAGIC);
 		return false;
 	}
-	if (flags & ~VALID_HANDSHAKE_FLAGS)
+	if (flags & ~VALID_NEWSTYLE_FLAGS)
 		warnx("%s: ignoring unknown handshake flags: %#06x",
 		      __func__, flags);
 	if (!(flags & NBD_FLAG_FIXED_NEWSTYLE)) {
@@ -206,7 +365,7 @@ nbd_negotiation_is_valid(struct nbd_negotiation *handshake)
 }
 
 static inline void
-nbd_negotiation_dump(struct nbd_negotiation *handshake)
+nbd_newstyle_negotiation_dump(struct nbd_newstyle_negotiation *handshake)
 {
 	uint16_t flags = handshake->handshake_flags;
 	
@@ -216,12 +375,12 @@ nbd_negotiation_dump(struct nbd_negotiation *handshake)
 	fprintf(stderr, "\thandshake_flags: %#06x [", flags);
 	if (flags & NBD_FLAG_FIXED_NEWSTYLE)
 		fprintf(stderr, "FIXED_NEWSTYLE");
-	if ((flags & VALID_HANDSHAKE_FLAGS) == VALID_HANDSHAKE_FLAGS)
+	if ((flags & VALID_NEWSTYLE_FLAGS) == VALID_NEWSTYLE_FLAGS)
 		fprintf(stderr, "|");
 	if (flags & NBD_FLAG_NO_ZEROES)
 		fprintf(stderr, "NO_ZEROES");
 	fprintf(stderr, "]");
-	if (flags & ~VALID_HANDSHAKE_FLAGS)
+	if (flags & ~VALID_NEWSTYLE_FLAGS)
 		fprintf(stderr, " (invalid)");
 	fprintf(stderr, "\n");
 }
@@ -243,9 +402,9 @@ nbd_client_flags_set_client_flags(struct nbd_client_flags *client_flags,
  * Returns -1 if an error is encountered.
  */
 static int
-nbd_client_handshake(struct nbd_client *client)
+nbd_client_newstyle_handshake(struct nbd_client *client)
 {
-	struct nbd_negotiation handshake;
+	struct nbd_newstyle_negotiation handshake;
 	struct nbd_client_flags response;
 	uint32_t client_flags;
 	ssize_t len;
@@ -264,11 +423,11 @@ nbd_client_handshake(struct nbd_client *client)
 		break;
 	}
 
-	nbd_negotiation_ntoh(&handshake);
+	nbd_newstyle_negotiation_ntoh(&handshake);
 	
-	if (!nbd_negotiation_is_valid(&handshake)) {
+	if (!nbd_newstyle_negotiation_is_valid(&handshake)) {
 		warnx("%s: invalid handshake:", __func__);
-		nbd_negotiation_dump(&handshake);
+		nbd_newstyle_negotiation_dump(&handshake);
 		return FAILURE;
 	}
 
@@ -708,29 +867,101 @@ nbd_client_negotiate_list_fixed_newstyle(struct nbd_client *client)
 	return SUCCESS;
 }
 
+struct handshake_magic {
+	uint64_t magic;
+	uint64_t style;
+} __packed;
+
+static inline void
+handshake_magic_ntoh(struct handshake_magic *handshake)
+{
+
+	handshake->magic = be64toh(handshake->magic);
+	handshake->style = be64toh(handshake->style);
+}
+
+static inline void
+handshake_magic_dump(struct handshake_magic *handshake)
+{
+
+	fprintf(stderr, "\tmagic: %#018lx (expected %#018lx)\n",
+		handshake->magic, NBD_MAGIC);
+	fprintf(stderr, "\tstyle: %#018lx (expected %#018lx or %#018lx)\n",
+		handshake->style, NBD_OLDSTYLE_MAGIC, NBD_NEWSTYLE_MAGIC);
+}
+
 int
 nbd_client_negotiate(struct nbd_client *client)
 {
+	struct handshake_magic handshake;
+	ssize_t len;
+	int sock;
 
-	if (nbd_client_handshake(client) == FAILURE) {
-		warnx("%s: handshake failed", __func__); 
+	sock = client->sock;
+
+	while (true) {
+		len = recv(sock, &handshake, sizeof handshake, MSG_PEEK);
+		if (client->disconnect)
+			return FAILURE;
+		if (len == -1 && errno == EINTR)
+			continue;
+		if (len == -1) {
+			warn("%s: connection failed", __func__);
+			return FAILURE;
+		}
+		if (len == sizeof handshake)
+			break;
+	}
+
+	handshake_magic_ntoh(&handshake);
+
+	if (handshake.magic != NBD_MAGIC) {
+		warnx("%s: handshake failed: invalid magic", __func__);
 		return FAILURE;
 	}
+		
 	
-	if (nbd_client_negotiate_options_fixed_newstyle(client)
-	    == FAILURE) {
-		warnx("%s: option negotiation failed", __func__);
-		return FAILURE;
+	if (handshake.style == NBD_OLDSTYLE_MAGIC) {
+
+		warnx("%s: oldstyle handshake detected", __func__);
+		
+		if (nbd_client_oldstyle_handshake(client) == FAILURE) {
+			warnx("%s: handshake failed", __func__);
+			return FAILURE;
+		}
+
+		return SUCCESS;
+
+	} else if (handshake.style == NBD_NEWSTYLE_MAGIC) {
+
+		warnx("%s: newstyle handshake detected", __func__);
+
+		if (nbd_client_newstyle_handshake(client) == FAILURE) {
+			warnx("%s: handshake failed", __func__); 
+			return FAILURE;
+		}
+	
+		if (nbd_client_negotiate_options_fixed_newstyle(client)
+		    == FAILURE) {
+			warnx("%s: option negotiation failed", __func__);
+			return FAILURE;
+		}
+
+		return SUCCESS;
+
 	}
 
-	return SUCCESS;
+	warnx("%s: handshake failed: unknown style:", __func__);
+	handshake_magic_dump(&handshake);
+
+	return FAILURE;
 }
 
 int
 nbd_client_list(struct nbd_client *client)
 {
 
-	if (nbd_client_handshake(client) == FAILURE) {
+	if (nbd_client_newstyle_handshake(client) == FAILURE) {
 		warnx("%s: handshake failed", __func__);
 		return FAILURE;
 	}
@@ -877,8 +1108,8 @@ nbd_client_send_trim(struct nbd_client *client, uint64_t handle,
 		warnx("%s: unsupported TRIM operation", __func__);
 		return EOPNOTSUPP;
 	}
-	
-	return nbd_client_send_request(client, NBD_CMD_FLUSH, handle,
+
+	return nbd_client_send_request(client, NBD_CMD_TRIM, handle,
 				       offset, length, 0, NULL);
 }
 
@@ -982,7 +1213,13 @@ nbd_client_recv_reply_header(struct nbd_client *client, uint64_t *handle)
 		goto bad_reply;
 	}
 
-	if (reply.error != SUCCESS) {
+	switch (reply.error) {
+	case SUCCESS:
+		break;
+	case NBD_EINVAL:
+		warnx("%s: server replied invalid command usage", __func__);
+		return EINVAL;
+	default:
 		warnx("%s: request error:", __func__);
 		goto bad_reply;
 	}

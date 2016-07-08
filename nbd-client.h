@@ -16,6 +16,8 @@ uint64_t nbd_client_get_size(nbd_client_t client);
 bool nbd_client_get_disconnect(nbd_client_t client);
 void nbd_client_set_disconnect(nbd_client_t client, bool disconnect);
 
+void nbd_client_disable_trim(nbd_client_t client);
+
 enum {
 	NBD_CLIENT_CONNECT_OK = 0,
 	

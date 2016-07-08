@@ -5,9 +5,10 @@
 #include <unistd.h>
 
 #include <sys/cdefs.h>
+#include <sys/param.h>
+#include <sys/bio.h>
 #include <sys/endian.h>
 #include <sys/event.h>
-#include <sys/param.h>
 #include <sys/queue.h>
 #include <sys/socket.h>
 #include <sys/syslimits.h>
@@ -57,6 +58,32 @@ signal_handler(int sig, siginfo_t *sinfo, void *uap)
 	disconnect_action();
 }
 
+static inline char const *
+bio_cmd_string(uint16_t cmd)
+{
+
+	switch (cmd) {
+
+#define CASE_MESSAGE(c) case c: return #c
+
+		CASE_MESSAGE(BIO_READ);
+		CASE_MESSAGE(BIO_WRITE);
+		CASE_MESSAGE(BIO_DELETE);
+		CASE_MESSAGE(BIO_GETATTR);
+		CASE_MESSAGE(BIO_FLUSH);
+		CASE_MESSAGE(BIO_CMD0);
+		CASE_MESSAGE(BIO_CMD1);
+		CASE_MESSAGE(BIO_CMD2);
+#ifdef BIO_ZONE
+		CASE_MESSAGE(BIO_ZONE);
+#endif
+
+#undef CASE_MESSAGE
+
+	default: return NULL;
+	}
+}
+
 int
 run_loop(ggate_context_t ggate, nbd_client_t nbd)
 {
@@ -95,8 +122,10 @@ run_loop(ggate_context_t ggate, nbd_client_t nbd)
 		switch (ggio.gctl_error) {
 		case SUCCESS:
 			break;
+
 		case ECANCELED:
 			return SUCCESS;
+
 		case ENXIO:
 		default:
 			warnc(ggio.gctl_error,
@@ -111,20 +140,24 @@ run_loop(ggate_context_t ggate, nbd_client_t nbd)
 						      ggio.gctl_offset,
 						      ggio.gctl_length);
 			break;
+
 		case BIO_WRITE:
 			result = nbd_client_send_write(nbd, ggio.gctl_seq,
 						       ggio.gctl_offset,
 						       ggio.gctl_length,
 						       sizeof buf, buf);
 			break;
+
 		case BIO_DELETE:
 			result = nbd_client_send_trim(nbd, ggio.gctl_seq,
 						      ggio.gctl_offset,
 						      ggio.gctl_length);
 			break;
+
 		case BIO_FLUSH:
 			result = nbd_client_send_flush(nbd, ggio.gctl_seq);
 			break;
+
 		default:
 			warnx("%s: unsupported operation: %d",
 			      __func__, ggio.gctl_cmd);
@@ -135,19 +168,51 @@ run_loop(ggate_context_t ggate, nbd_client_t nbd)
 		switch (result) {
 		case SUCCESS:
 			break;
+
 		case EOPNOTSUPP:
 			ggio.gctl_error = EOPNOTSUPP;
 			goto done;
+
 		case FAILURE:
 			warnx("%s: nbd client error", __func__);
 			goto fail;
+
 		default:
 			warnx("%s: unhandled nbd command result", __func__);
 			goto fail;
 		}
 
 		result = nbd_client_recv_reply_header(nbd, &ggio.gctl_seq);
-		if (result == FAILURE) {
+		switch (result) {
+		case SUCCESS:
+			break;
+
+		case EINVAL:
+		{
+			char const *name;
+
+			if (ggio.gctl_cmd == BIO_DELETE) {
+				// Some servers lie about support for TRIM.
+				nbd_client_disable_trim(nbd);
+				ggio.gctl_error = EOPNOTSUPP;
+				goto done;
+			}
+			warnx("%s: server rejected command request:",
+			      __func__);
+			name = bio_cmd_string(ggio.gctl_cmd);
+			if (name == NULL)
+				fprintf(stderr, "\tcommand: %u (unknown)\n",
+					ggio.gctl_cmd);
+			else
+				fprintf(stderr, "\tcommand: %s\n", name);
+			fprintf(stderr, "\toffset: %lx (%ld)\n",
+				ggio.gctl_offset, ggio.gctl_offset);
+			fprintf(stderr, "\tlength: %lx (%lu)\n",
+				ggio.gctl_length, ggio.gctl_length);
+			goto fail;
+		}
+
+		default:
 			if (disconnect)
 				return SUCCESS;
 			warnx("%s: error receiving reply header", __func__);
@@ -178,8 +243,10 @@ run_loop(ggate_context_t ggate, nbd_client_t nbd)
 		case SUCCESS:
 		case EOPNOTSUPP:
 			break;
+
 		case ECANCELED:
 			return SUCCESS;
+
 		case ENXIO:
 		default:
 			warnc(ggio.gctl_error,
