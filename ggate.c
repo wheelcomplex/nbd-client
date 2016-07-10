@@ -1,18 +1,18 @@
-#include <sys/cdefs.h>
-#include <sys/param.h>
-#include <sys/types.h>
+#include <sys/capsicum.h>
 #include <sys/linker.h>
 #include <sys/module.h>
+#include <sys/types.h>
+
+#include <geom/gate/g_gate.h>
+
 #include <assert.h>
-#include <errno.h>
 #include <err.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-
-#include <geom/gate/g_gate.h>
 
 #include "check.h"
 #include "ggate.h"
@@ -23,7 +23,7 @@ ggate_load_module()
 
 	if (modfind("g_gate") != FAILURE)
 		return SUCCESS;
-	
+
 	if (kldload("geom_gate") == FAILURE
 	    || modfind("g_gate") == FAILURE) {
 		if (errno != EEXIST) {
@@ -82,7 +82,7 @@ ggate_context_open(struct ggate_context *ctx)
 	}
 
 	ctx->ctl = fd;
-	
+
 	return SUCCESS;
 }
 
@@ -92,6 +92,35 @@ ggate_context_close(struct ggate_context *ctx)
 
 	close(ctx->ctl);
 	ctx->ctl = -1;
+}
+
+int
+ggate_context_rights_limit(struct ggate_context *ctx)
+{
+	unsigned long const cmds[] = {
+		G_GATE_CMD_CREATE, G_GATE_CMD_DESTROY,
+		G_GATE_CMD_START, G_GATE_CMD_DONE, G_GATE_CMD_CANCEL,
+	};
+	cap_rights_t rights;
+	int ctl;
+
+	ctl = ctx->ctl;
+
+	if (cap_rights_limit(ctl, cap_rights_init(&rights, CAP_IOCTL))
+	    == FAILURE) {
+		warn("%s: failed to limit capabilities (/dev/%s)",
+		     __func__, G_GATE_CTL_NAME);
+		return FAILURE;
+	}
+
+	if (cap_ioctls_limit(ctl, cmds, sizeof cmds / sizeof cmds[0])
+	    == FAILURE) {
+		warn("%s: failed to limit ioctls (/dev/%s)",
+		     __func__, G_GATE_CTL_NAME);
+		return FAILURE;
+	}
+
+	return SUCCESS;
 }
 
 int
@@ -105,7 +134,7 @@ int
 ggate_context_ioctl(struct ggate_context *ctx, uint64_t req, void *data)
 {
 	int error;
-	
+
 	while (ioctl(ctx->ctl, req, data) == FAILURE) {
 		if (errno == EINTR)
 			continue;
@@ -121,7 +150,7 @@ ggate_context_ioctl(struct ggate_context *ctx, uint64_t req, void *data)
 static inline void
 g_gate_ctl_create_dump(struct g_gate_ctl_create *ggioc)
 {
-	
+
 	fprintf(stderr, "\tgctl_version: %u\n", ggioc->gctl_version);
 	fprintf(stderr, "\tgctl_mediasize: %ld\n", ggioc->gctl_mediasize);
 	fprintf(stderr, "\tgctl_sectorsize: %u\n", ggioc->gctl_sectorsize);
@@ -133,6 +162,24 @@ g_gate_ctl_create_dump(struct g_gate_ctl_create *ggioc)
 	fprintf(stderr, "\tgctl_readprov: %.*s\n", NAME_MAX, ggioc->gctl_readprov);
 	fprintf(stderr, "\tgctl_readoffset: %ld\n", ggioc->gctl_readoffset);
 	fprintf(stderr, "\tgctl_unit: %d\n", ggioc->gctl_unit);
+}
+
+static int
+limit_create_ioctl(struct ggate_context *ctx)
+{
+	unsigned long const cmds[] = {
+		G_GATE_CMD_DESTROY, G_GATE_CMD_CANCEL,
+		G_GATE_CMD_START, G_GATE_CMD_DONE,
+	};
+
+	if (cap_ioctls_limit(ctx->ctl, cmds, sizeof cmds / sizeof cmds[0])
+	    == FAILURE) {
+		warn("%s: failed to limit ioctls (/dev/%s)", __func__,
+		     G_GATE_CTL_NAME);
+		return FAILURE;
+	}
+
+	return SUCCESS;
 }
 
 int
@@ -164,6 +211,9 @@ ggate_context_create_device(struct ggate_context *ctx, char const *host,
 		g_gate_ctl_create_dump(&ggioc);
 		return FAILURE;
 	}
+
+	if (limit_create_ioctl(ctx) == FAILURE)
+		return FAILURE;
 
 	if (unit == G_GATE_UNIT_AUTO) {
 		printf("%s%u\n", G_GATE_PROVIDER_NAME, ggioc.gctl_unit);

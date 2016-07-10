@@ -1,17 +1,18 @@
-#include <sys/cdefs.h>
-#include <sys/param.h>
+#include <sys/capsicum.h>
 #include <sys/endian.h>
 #include <sys/socket.h>
 #include <sys/syslimits.h>
 #include <sys/types.h>
+
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
-#include <netdb.h>
+
 #include <assert.h>
 #include <errno.h>
 #include <err.h>
 #include <math.h>
+#include <netdb.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,7 +20,6 @@
 #include <unistd.h>
 
 #include "check.h"
-
 #include "nbd-client.h"
 #include "nbd-protocol.h"
 
@@ -64,7 +64,7 @@ nbd_client_init(struct nbd_client *client)
 	int on;
 
 	on = 1;
-	
+
 	memset(client, 0, sizeof *client);
 
 	sock = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -78,7 +78,7 @@ nbd_client_init(struct nbd_client *client)
 		warn("%s: failed to set socket option TCP_NODELAY", __func__);
 		return FAILURE;
 	}
-	
+
 	if (setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &on, sizeof on)
 	    == FAILURE) {
 		warn("%s: failed to set socket option SO_KEEPALIVE", __func__);
@@ -87,7 +87,7 @@ nbd_client_init(struct nbd_client *client)
 	/*
 	tv.tv_sec = NBD_CLIENT_TIMEOUT;
 	tv.tv_usec = 0;
-	
+
 	if (setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv)
 	    == FAILURE) {
 		warn("%s: failed to set socket option SO_SNDTIMEO", __func__);
@@ -110,6 +110,21 @@ nbd_client_close(struct nbd_client *client)
 {
 
 	close(client->sock);
+}
+
+int
+nbd_client_rights_limit(struct nbd_client *client)
+{
+	cap_rights_t rights;
+
+	cap_rights_init(&rights, CAP_SEND, CAP_RECV, CAP_SHUTDOWN);
+
+	if (cap_rights_limit(client->sock, &rights) == FAILURE) {
+		warn("%s: failed to limit capabilities", __func__);
+		return FAILURE;
+	}
+
+	return SUCCESS;
 }
 
 uint64_t
@@ -141,30 +156,19 @@ nbd_client_disable_trim(struct nbd_client *client)
 }
 
 int
-nbd_client_connect(struct nbd_client *client, char const *address,
-		   char const *port)
+nbd_client_connect(struct nbd_client *client, struct addrinfo *ai)
 {
-	struct addrinfo *ai;
 	int sock;
 
 	sock = client->sock;
 
-	if (getaddrinfo(address, port, NULL, &ai) != SUCCESS) {
-		warn("%s: failed to locate server (%s)",
-		     __func__, address);
-		return NBD_CLIENT_CONNECT_ERROR_USAGE;
-	}
-
 	if (connect(sock, ai->ai_addr, sizeof *ai->ai_addr) == FAILURE) {
-		warn("%s: failed to connect to remote server (%s:%s)",
-		     __func__, address, port);
-		freeaddrinfo(ai);
-		return NBD_CLIENT_CONNECT_ERROR_CONNECT;
+		warn("%s: failed to connect to remote server (%s)",
+		     __func__, ai->ai_canonname);
+		return FAILURE;
 	}
 
-	freeaddrinfo(ai);
-
-	return NBD_CLIENT_CONNECT_OK;
+	return SUCCESS;
 }
 
 void
@@ -263,12 +267,12 @@ nbd_oldstyle_negotiation_is_valid(struct nbd_oldstyle_negotiation *handshake)
 
 	return true;
 }
-	
+
 static inline void
 nbd_oldstyle_negotiation_dump(struct nbd_oldstyle_negotiation *handshake)
 {
 	uint32_t flags = handshake->flags;
-	
+
 	fprintf(stderr, "\tmagic: %#018lx\n", handshake->magic);
 	fprintf(stderr, "\toldstyle_magic: %#018lx\n",
 		handshake->oldstyle_magic);
@@ -305,7 +309,7 @@ nbd_client_oldstyle_handshake(struct nbd_client *client)
 
 	//fprintf(stderr, "%s: negotiation:\n", __func__);
 	//nbd_oldstyle_negotiation_dump(&handshake);
-	
+
 	if (!nbd_oldstyle_negotiation_is_valid(&handshake)) {
 		warnx("%s: invalid handshake:", __func__);
 		nbd_oldstyle_negotiation_dump(&handshake);
@@ -317,7 +321,7 @@ nbd_client_oldstyle_handshake(struct nbd_client *client)
 
 	//fprintf(stderr, "%s: client:\n", __func__);
 	//nbd_client_dump(client);
-	
+
 	if (!(handshake.flags & NBD_FLAG_SEND_FLUSH))
 		warnx("%s: server does not support FLUSH command", __func__);
 	if (!(handshake.flags & NBD_FLAG_SEND_TRIM))
@@ -368,7 +372,7 @@ static inline void
 nbd_newstyle_negotiation_dump(struct nbd_newstyle_negotiation *handshake)
 {
 	uint16_t flags = handshake->handshake_flags;
-	
+
 	fprintf(stderr, "\tmagic: %#018lx\n", handshake->magic);
 	fprintf(stderr, "\tnewstyle_magic: %#018lx\n",
 		handshake->newstyle_magic);
@@ -424,7 +428,7 @@ nbd_client_newstyle_handshake(struct nbd_client *client)
 	}
 
 	nbd_newstyle_negotiation_ntoh(&handshake);
-	
+
 	if (!nbd_newstyle_negotiation_is_valid(&handshake)) {
 		warnx("%s: invalid handshake:", __func__);
 		nbd_newstyle_negotiation_dump(&handshake);
@@ -436,7 +440,7 @@ nbd_client_newstyle_handshake(struct nbd_client *client)
 		client_flags |= NBD_CLIENT_FLAG_NO_ZEROES;
 
 	nbd_client_flags_set_client_flags(&response, client_flags);
-	
+
 	len = send(sock, &response, sizeof response, MSG_NOSIGNAL);
 	if (len != sizeof response)
 		goto connection_fail;
@@ -453,7 +457,7 @@ nbd_client_newstyle_handshake(struct nbd_client *client)
 static inline void
 nbd_option_init(struct nbd_option *option)
 {
-	
+
 	memset(option, 0, sizeof *option);
 	option->magic = htobe64(NBD_OPTION_MAGIC);
 }
@@ -468,7 +472,7 @@ nbd_option_set_option(struct nbd_option *option, uint32_t opt)
 static inline void
 nbd_option_set_length(struct nbd_option *option, uint32_t length)
 {
-	
+
 	option->length = htobe32(length);
 }
 
@@ -545,7 +549,7 @@ nbd_option_reply_option_string(struct nbd_option_reply *reply)
 #define CASE_MESSAGE(c) case c: return #c
 #define EXTENSION " [unsupported extension]"
 #define WITHDRAWN " [withdrawn]"
-		
+
 		CASE_MESSAGE(NBD_OPTION_EXPORT_NAME);
 		CASE_MESSAGE(NBD_OPTION_ABORT);
 		CASE_MESSAGE(NBD_OPTION_LIST);
@@ -574,7 +578,7 @@ nbd_option_reply_type_string(struct nbd_option_reply *reply)
 #define EXTENSION " [unsupported extension]"
 #define UNUSED    " [unused]"
 #define TODO      " [todo]"
-	
+
 		CASE_MESSAGE(NBD_REPLY_ACK);
 		CASE_MESSAGE(NBD_REPLY_SERVER);
 		CASE_MESSAGE(NBD_REPLY_INFO) EXTENSION;
@@ -601,7 +605,7 @@ nbd_option_reply_dump(struct nbd_option_reply *reply)
 {
 	char const *option = nbd_option_reply_option_string(reply);
 	char const *type = nbd_option_reply_type_string(reply);
-	
+
 	fprintf(stderr, "\tmagic: %#018lx\n", reply->magic);
 
 	if (option == NULL)
@@ -630,7 +634,7 @@ nbd_client_recv_option_reply(struct nbd_client *client,
 	int sock;
 
 	sock = client->sock;
-	
+
 	while (true) {
 		len = recv(sock, reply, sizeof *reply, MSG_WAITALL);
 		if (client->disconnect)
@@ -756,7 +760,7 @@ nbd_client_negotiate_options_fixed_newstyle(struct nbd_client *client)
 		warnx("%s: receiving export info failed", __func__);
 		return FAILURE;
 	}
-	
+
 	if (!(info.transmission_flags & NBD_FLAG_SEND_FLUSH)) {
 		warnx("%s: server does not support FLUSH command", __func__);
 		//return FAILURE;
@@ -765,7 +769,7 @@ nbd_client_negotiate_options_fixed_newstyle(struct nbd_client *client)
 		warnx("%s: server does not support TRIM command", __func__);
 		//return FAILURE;
 	}
-	
+
 	return SUCCESS;
 }
 
@@ -817,12 +821,12 @@ nbd_client_negotiate_list_fixed_newstyle(struct nbd_client *client)
 
 			return FAILURE;
 		}
-		
+
 		if (reply.type == NBD_REPLY_ACK)
 			break;
 
 		assert(reply.type == NBD_REPLY_SERVER);
-		
+
 		server_export = (struct nbd_option_reply_server *)buf;
 		nbd_option_reply_server_ntoh(server_export);
 		if (server_export->length == 0) {
@@ -844,7 +848,7 @@ nbd_client_negotiate_list_fixed_newstyle(struct nbd_client *client)
 		remaining = server_export->length - BUFLEN;
 
 		assert(remaining > 0);
-		
+
 		do {
 			recvlen = MIN(remaining, BUFLEN);
 			len = recv(client->sock, buf, recvlen, 0);
@@ -919,12 +923,11 @@ nbd_client_negotiate(struct nbd_client *client)
 		warnx("%s: handshake failed: invalid magic", __func__);
 		return FAILURE;
 	}
-		
-	
+
 	if (handshake.style == NBD_OLDSTYLE_MAGIC) {
 
 		warnx("%s: oldstyle handshake detected", __func__);
-		
+
 		if (nbd_client_oldstyle_handshake(client) == FAILURE) {
 			warnx("%s: handshake failed", __func__);
 			return FAILURE;
@@ -937,10 +940,10 @@ nbd_client_negotiate(struct nbd_client *client)
 		warnx("%s: newstyle handshake detected", __func__);
 
 		if (nbd_client_newstyle_handshake(client) == FAILURE) {
-			warnx("%s: handshake failed", __func__); 
+			warnx("%s: handshake failed", __func__);
 			return FAILURE;
 		}
-	
+
 		if (nbd_client_negotiate_options_fixed_newstyle(client)
 		    == FAILURE) {
 			warnx("%s: option negotiation failed", __func__);
@@ -965,7 +968,7 @@ nbd_client_list(struct nbd_client *client)
 		warnx("%s: handshake failed", __func__);
 		return FAILURE;
 	}
-	
+
 	if (nbd_client_negotiate_list_fixed_newstyle(client) == FAILURE) {
 		warnx("%s: server listing failed", __func__);
 		return FAILURE;
@@ -1061,7 +1064,7 @@ nbd_client_send_request(struct nbd_client *client, uint16_t command,
 		return MOREDATA;
 
 	return SUCCESS;
-	
+
  connection_fail:
 	warn("%s: connection failed", __func__);
 	return FAILURE;
@@ -1151,7 +1154,7 @@ nbd_reply_error_string(struct nbd_reply *reply)
 
 #define CASE_MESSAGE(c) case c: return #c
 #define EXTENSION " [unsupported extension]"
-	
+
 		CASE_MESSAGE(NBD_EPERM);
 		CASE_MESSAGE(NBD_EIO);
 		CASE_MESSAGE(NBD_ENOMEM);
@@ -1246,7 +1249,7 @@ nbd_client_recv_reply_data(struct nbd_client *client, size_t length,
 
 	assert(buflen > 0);
 	assert(buf != NULL);
-	
+
 	sock = client->sock;
 
 	recvlen = MIN(length, buflen);

@@ -1,38 +1,34 @@
-#include <stdbool.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-
-#include <sys/cdefs.h>
-#include <sys/param.h>
 #include <sys/bio.h>
+#include <sys/capsicum.h>
 #include <sys/endian.h>
-#include <sys/event.h>
-#include <sys/queue.h>
 #include <sys/socket.h>
 #include <sys/syslimits.h>
 #include <sys/types.h>
-#include <sys/bio.h>
-#include <machine/param.h>
-#include <netinet/in.h>
+
 #include <arpa/inet.h>
+#include <netinet/in.h>
+
+#include <geom/gate/g_gate.h>
+
+#include <machine/param.h>
 
 #include <Block.h>
 #include <assert.h>
 #include <errno.h>
 #include <err.h>
 #include <math.h>
+#include <netdb.h>
 #include <signal.h>
-
-#include <geom/gate/g_gate.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
 
 #include "check.h"
-
+#include "ggate.h"
 #include "nbd-client.h"
 #include "nbd-protocol.h"
-
-#include "ggate.h"
 
 enum {
 	DEFAULT_SECTOR_SIZE = 512,
@@ -102,7 +98,7 @@ run_loop(ggate_context_t ggate, nbd_client_t nbd)
 		nbd_client_set_disconnect(nbd, true);
 		disconnect = 1;
 	};
-	
+
 	sa.sa_sigaction = signal_handler;
 	sa.sa_flags = SA_SIGINFO;
 	if (sigaction(SIGINT, &sa, NULL) == FAILURE) {
@@ -263,14 +259,30 @@ run_loop(ggate_context_t ggate, nbd_client_t nbd)
 	return FAILURE;
 }
 
+static int
+enter_capability_mode()
+{
+	cap_rights_t rights;
+
+	fclose(stdin);
+
+	if (cap_enter() == FAILURE) {
+		warn("cannot enter capabilities mode");
+		return FAILURE;
+	}
+
+	return SUCCESS;
+}
+
 int
 main(int argc, char *argv[])
 {
 	ggate_context_t ggate;
 	nbd_client_t nbd;
 	char const *host, *port;
+	struct addrinfo *ai;
 	uint64_t size;
-	int retval;
+	int result, retval;
 
 	retval = EXIT_FAILURE;
 	ggate = NULL;
@@ -280,7 +292,7 @@ main(int argc, char *argv[])
 	 * Check for the correct number of arguments and ensure the
 	 * geom_gate module is loaded.
 	 */
-	
+
 	if (argc < 2 || argc > 3) {
 		usage();
 		return EXIT_FAILURE;
@@ -307,12 +319,12 @@ main(int argc, char *argv[])
 	/*
 	 * Initialize the ggate context and nbd socket.
 	 */
-	
+
 	ggate_context_init(ggate);
 	if (ggate_context_open(ggate) == FAILURE) {
 		warnx("cannot open ggate context");
 		goto close;
-	}	
+	}
 
 	if (nbd_client_init(nbd) == FAILURE) {
 		warnx("cannot create socket");
@@ -322,25 +334,37 @@ main(int argc, char *argv[])
 	/*
 	 * Connect to the nbd server.
 	 */
-	
-	switch (nbd_client_connect(nbd, host, port)) {
 
-	case NBD_CLIENT_CONNECT_ERROR_USAGE:
-		usage();
+	if (getaddrinfo(host, port, NULL, &ai) != SUCCESS) {
+		warn("failed to locate server (%s)", host);
 		goto close;
+	}
 
-	case NBD_CLIENT_CONNECT_ERROR_CONNECT:
+	result = nbd_client_connect(nbd, ai);
+	freeaddrinfo(ai);
+
+	if (result == FAILURE) {
 		warnx("failed to connect to the server");
 		goto close;
-
-	default:
-		break;
 	}
+
+	/*
+	 * Drop to a restricted set of capabilities.
+	 *
+	 * Capsicum isn't permitting the connect(2) to go through in
+	 * capability mode, so we're stuck entering after the connection is
+	 * established.
+	 */
+
+	if (enter_capability_mode() == FAILURE
+	    || ggate_context_rights_limit(ggate) == FAILURE
+	    || nbd_client_rights_limit(nbd) == FAILURE)
+		goto disconnect;
 
 	/*
 	 * Negotiate options with the server.
 	 */
-	
+
 	if (nbd_client_negotiate(nbd) == FAILURE) {
 		warnx("failed to negotiate options");
 		goto disconnect;
@@ -351,7 +375,7 @@ main(int argc, char *argv[])
 	/*
 	 * Create the nbd device.
 	 */
-	
+
 	if (ggate_context_create_device(ggate, host, NBD_DEFAULT_PORT, "",
 					size, DEFAULT_SECTOR_SIZE,
 					DEFAULT_GGATE_FLAGS) == FAILURE) {
@@ -374,7 +398,7 @@ main(int argc, char *argv[])
 
 	/* Destroy the ggate device. */
  destroy:
-	ggate_context_cancel(ggate, 0);	
+	ggate_context_cancel(ggate, 0);
 	ggate_context_destroy_device(ggate, true);
 
 	/* Disconnect the NBD client. */
@@ -392,6 +416,6 @@ main(int argc, char *argv[])
  cleanup:
 	nbd_client_free(nbd);
 	ggate_context_free(ggate);
-	
+
 	return retval;
 }

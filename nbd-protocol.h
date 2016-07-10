@@ -163,7 +163,7 @@ struct nbd_export_info {
  *  - All write commands must be completed before a flush command can be
  *    processed.
  *  - Data sent by the client with the FUA flag set must be written to
- *    persistent storage by the server before the server may reply.   
+ *    persistent storage by the server before the server may reply.
  *
  * Only the client may cleanly disconnect during transmission, by sending
  * the DISCONNECT command.  Either the client or server may perform a hard

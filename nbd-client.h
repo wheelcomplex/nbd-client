@@ -3,6 +3,8 @@
 
 #include <sys/types.h>
 
+struct addrinfo;
+
 typedef struct nbd_client *nbd_client_t;
 
 nbd_client_t nbd_client_alloc();
@@ -11,6 +13,8 @@ void nbd_client_free(nbd_client_t client);
 int nbd_client_init(nbd_client_t client);
 void nbd_client_close(nbd_client_t client);
 
+int nbd_client_rights_limit(nbd_client_t client);
+
 uint64_t nbd_client_get_size(nbd_client_t client);
 
 bool nbd_client_get_disconnect(nbd_client_t client);
@@ -18,15 +22,7 @@ void nbd_client_set_disconnect(nbd_client_t client, bool disconnect);
 
 void nbd_client_disable_trim(nbd_client_t client);
 
-enum {
-	NBD_CLIENT_CONNECT_OK = 0,
-	
-	NBD_CLIENT_CONNECT_ERROR_USAGE = -1,
-	NBD_CLIENT_CONNECT_ERROR_CONNECT = -2,
-};
-
-int nbd_client_connect(nbd_client_t client, char const *address,
-		       char const *port);
+int nbd_client_connect(nbd_client_t client, struct addrinfo *ai);
 void nbd_client_shutdown(nbd_client_t client);
 
 int nbd_client_list(nbd_client_t client);

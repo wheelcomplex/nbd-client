@@ -20,6 +20,8 @@ void ggate_context_free(ggate_context_t ctx);
 int ggate_context_open(ggate_context_t ctx);
 void ggate_context_close(ggate_context_t ctx);
 
+int ggate_context_rights_limit(ggate_context_t ctx);
+
 int ggate_context_get_unit(ggate_context_t ctx);
 
 int ggate_context_ioctl(ggate_context_t ctx, uint64_t req, void *data);
