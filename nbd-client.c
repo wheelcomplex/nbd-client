@@ -10,13 +10,13 @@
 
 #include <assert.h>
 #include <errno.h>
-#include <err.h>
 #include <math.h>
 #include <netdb.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <syslog.h>
 #include <unistd.h>
 
 #include "check.h"
@@ -43,7 +43,8 @@ nbd_client_alloc()
 	client = (struct nbd_client *)malloc(sizeof (struct nbd_client));
 	if (client == NULL) {
 		assert(errno == ENOMEM);
-		warn("%s: failed to allocate nbd client", __func__);
+		syslog(LOG_ERR, "%s: failed to allocate nbd client: %m",
+		       __func__);
 	}
 
 	return client;
@@ -69,19 +70,23 @@ nbd_client_init(struct nbd_client *client)
 
 	sock = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
 	if (sock == FAILURE) {
-		warn("%s: failed to create socket", __func__);
+		syslog(LOG_ERR, "%s: failed to create socket: %m", __func__);
 		return FAILURE;
 	}
 
 	if (setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &on, sizeof on)
 	    == FAILURE) {
-		warn("%s: failed to set socket option TCP_NODELAY", __func__);
+		syslog(LOG_ERR,
+		       "%s: failed to set socket option TCP_NODELAY: %m",
+		       __func__);
 		return FAILURE;
 	}
 
 	if (setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &on, sizeof on)
 	    == FAILURE) {
-		warn("%s: failed to set socket option SO_KEEPALIVE", __func__);
+		syslog(LOG_ERR,
+		       "%s: failed to set socket option SO_KEEPALIVE: %m",
+		       __func__);
 		return FAILURE;
 	}
 	/*
@@ -90,13 +95,17 @@ nbd_client_init(struct nbd_client *client)
 
 	if (setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv)
 	    == FAILURE) {
-		warn("%s: failed to set socket option SO_SNDTIMEO", __func__);
+		syslog(LOG_ERR,
+		       "%s: failed to set socket option SO_SNDTIMEO: %m",
+		       __func__);
 		return FAILURE;
 	}
 
 	if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv)
 	    == FAILURE) {
-		warn("%s: failed to set socket option SO_RCVTIMEO", __func__);
+		syslog(LOG_ERR,
+		       "%s: failed to set socket option SO_RCVTIMEO: %m",
+		       __func__);
 		return FAILURE;
 	}
 	*/
@@ -120,7 +129,8 @@ nbd_client_rights_limit(struct nbd_client *client)
 	cap_rights_init(&rights, CAP_SEND, CAP_RECV, CAP_SHUTDOWN);
 
 	if (cap_rights_limit(client->sock, &rights) == FAILURE) {
-		warn("%s: failed to limit capabilities", __func__);
+		syslog(LOG_ERR, "%s: failed to limit capabilities: %m",
+		       __func__);
 		return FAILURE;
 	}
 
@@ -163,8 +173,9 @@ nbd_client_connect(struct nbd_client *client, struct addrinfo *ai)
 	sock = client->sock;
 
 	if (connect(sock, ai->ai_addr, sizeof *ai->ai_addr) == FAILURE) {
-		warn("%s: failed to connect to remote server (%s)",
-		     __func__, ai->ai_canonname);
+		syslog(LOG_ERR,
+		       "%s: failed to connect to remote server (%s): %m",
+		       __func__, ai->ai_canonname);
 		return FAILURE;
 	}
 
@@ -208,31 +219,40 @@ nbd_client_dump(struct nbd_client *client)
 	};
 	const size_t FlagsLen = sizeof Flags / sizeof Flags[0];
 
+	char flag_string[128], *curflag;
 	uint32_t flags;
-	size_t i;
+	size_t i, len;
 
-	fprintf(stderr, "\tsock: %d\n", client->sock);
-	fprintf(stderr, "\tdisconnect: %s\n",
-		client->disconnect ? "true" : "false");
+	syslog(LOG_DEBUG, "\tsock: %d", client->sock);
+	syslog(LOG_DEBUG, "\tdisconnect: %s",
+	       client->disconnect ? "true" : "false");
 	flags = client->flags;
-	fprintf(stderr, "\tflags: %#010x [", flags);
+	curflag = flag_string;
+	len = sizeof flag_string;
 	i = FlagsLen;
-	while (i--) {
+	while (len && i--) {
 		char const *name;
+		size_t namelen, t;
 		uint32_t value;
 		bool match, last;
 
 		value = Flags[i];
 		name = nbd_client_flag_string(value);
+		namelen = strlen(name);
 		match = (flags & value) != 0;
 		last = i > 0;
 
 		assert(name != NULL);
 
-		fprintf(stderr, "%s%s", match ? name : "",
-			last ? (match ? "|" : "") : "]\n");
+		snprintf(curflag, len, "%s%s", match ? name : "",
+			 last ? (match ? "|" : "") : "");
+
+		t = namelen + (match ? 1 : 0); // doesn't matter on last
+		curflag += t;
+		len -= t;
 	}
-	fprintf(stderr, "\tsize: %lu\n", client->size);
+	syslog(LOG_DEBUG, "\tflags: %#010x [%s]", flags, flag_string);
+	syslog(LOG_DEBUG, "\tsize: %lu", client->size);
 }
 
 static inline void
@@ -250,18 +270,21 @@ nbd_oldstyle_negotiation_is_valid(struct nbd_oldstyle_negotiation *handshake)
 {
 
 	if (handshake->magic != NBD_MAGIC) {
-		warnx("%s: invalid magic: %#018lx (expected %#018lx)",
-		      __func__, handshake->magic, NBD_MAGIC);
+		syslog(LOG_ERR,
+		       "%s: invalid magic: %#018lx (expected %#018lx)",
+		       __func__, handshake->magic, NBD_MAGIC);
 		return false;
 	}
 	if (handshake->oldstyle_magic != NBD_OLDSTYLE_MAGIC) {
-		warnx("%s: invalid oldstyle magic: %#018lx (expected %#018lx)",
-		      __func__, handshake->oldstyle_magic, NBD_OLDSTYLE_MAGIC);
+		syslog(LOG_ERR,
+		       "%s: invalid oldstyle magic: %#018lx (expected %#018lx)",
+		       __func__, handshake->oldstyle_magic, NBD_OLDSTYLE_MAGIC);
 		return false;
 	}
 	if (!(handshake->flags & NBD_FLAG_HAS_FLAGS)) {
-		warnx("%s: invalid flags: %#010x (expected low bit set)",
-		      __func__, handshake->flags);
+		syslog(LOG_ERR,
+		       "%s: invalid flags: %#010x (expected low bit set)",
+		       __func__, handshake->flags);
 		return false;
 	}
 
@@ -273,14 +296,12 @@ nbd_oldstyle_negotiation_dump(struct nbd_oldstyle_negotiation *handshake)
 {
 	uint32_t flags = handshake->flags;
 
-	fprintf(stderr, "\tmagic: %#018lx\n", handshake->magic);
-	fprintf(stderr, "\toldstyle_magic: %#018lx\n",
-		handshake->oldstyle_magic);
-	fprintf(stderr, "\tsize: %lu\n", handshake->size);
-	fprintf(stderr, "\tflags: %#010x", flags);
-	if (!(flags & NBD_FLAG_HAS_FLAGS))
-		fprintf(stderr, " (invalid)");
-	fprintf(stderr, "\n");
+	syslog(LOG_DEBUG, "\tmagic: %#018lx", handshake->magic);
+	syslog(LOG_DEBUG, "\toldstyle_magic: %#018lx",
+	       handshake->oldstyle_magic);
+	syslog(LOG_DEBUG, "\tsize: %lu", handshake->size);
+	syslog(LOG_DEBUG, "\tflags: %#010x%s", flags,
+	       (flags & NBD_FLAG_HAS_FLAGS) ? "" : " (invalid)");
 }
 
 static int
@@ -299,7 +320,7 @@ nbd_client_oldstyle_handshake(struct nbd_client *client)
 		if (len == -1 && errno == EINTR)
 			continue;
 		if (len != sizeof handshake) {
-			warn("%s: connection failed", __func__);
+			syslog(LOG_ERR, "%s: connection failed: %m", __func__);
 			return FAILURE;
 		}
 		break;
@@ -307,11 +328,11 @@ nbd_client_oldstyle_handshake(struct nbd_client *client)
 
 	nbd_oldstyle_negotiation_ntoh(&handshake);
 
-	//fprintf(stderr, "%s: negotiation:\n", __func__);
+	//syslog(LOG_DEBUG, "%s: negotiation", __func__);
 	//nbd_oldstyle_negotiation_dump(&handshake);
 
 	if (!nbd_oldstyle_negotiation_is_valid(&handshake)) {
-		warnx("%s: invalid handshake:", __func__);
+		syslog(LOG_ERR, "%s: invalid handshake", __func__);
 		nbd_oldstyle_negotiation_dump(&handshake);
 		return FAILURE;
 	}
@@ -319,13 +340,15 @@ nbd_client_oldstyle_handshake(struct nbd_client *client)
 	client->size = handshake.size;
 	client->flags = handshake.flags;
 
-	//fprintf(stderr, "%s: client:\n", __func__);
+	//syslog(LOG_DEBUG, "%s: client", __func__);
 	//nbd_client_dump(client);
 
 	if (!(handshake.flags & NBD_FLAG_SEND_FLUSH))
-		warnx("%s: server does not support FLUSH command", __func__);
+		syslog(LOG_INFO,
+		       "%s: server does not support FLUSH command", __func__);
 	if (!(handshake.flags & NBD_FLAG_SEND_TRIM))
-		warnx("%s: server does not support TRIM command", __func__);
+		syslog(LOG_INFO,
+		       "%s: server does not support TRIM command", __func__);
 
 	return SUCCESS;
 }
@@ -347,21 +370,23 @@ nbd_newstyle_negotiation_is_valid(struct nbd_newstyle_negotiation *handshake)
 	uint16_t flags = handshake->handshake_flags;
 
 	if (handshake->magic != NBD_MAGIC) {
-		warnx("%s: invalid magic: %#018lx (expected %#018lx)",
-		      __func__, handshake->magic, NBD_MAGIC);
+		syslog(LOG_ERR,
+		       "%s: invalid magic: %#018lx (expected %#018lx)",
+		       __func__, handshake->magic, NBD_MAGIC);
 		return false;
 	}
 	if (handshake->newstyle_magic != NBD_NEWSTYLE_MAGIC) {
-		warnx("%s: invalid newstyle magic: %#018lx (expected %#018lx)",
-		      __func__, handshake->newstyle_magic, NBD_NEWSTYLE_MAGIC);
+		syslog(LOG_ERR,
+		       "%s: invalid newstyle magic: %#018lx (expected %#018lx)",
+		       __func__, handshake->newstyle_magic, NBD_NEWSTYLE_MAGIC);
 		return false;
 	}
 	if (flags & ~VALID_NEWSTYLE_FLAGS)
-		warnx("%s: ignoring unknown handshake flags: %#06x",
-		      __func__, flags);
+		syslog(LOG_ERR, "%s: ignoring unknown handshake flags: %#06x",
+		       __func__, flags);
 	if (!(flags & NBD_FLAG_FIXED_NEWSTYLE)) {
-		warnx("%s: this server does not support the fixed "
-		      "newstyle protocol", __func__);
+		syslog(LOG_ERR, "%s: this server does not support the fixed "
+		       "newstyle protocol", __func__);
 		return false;
 	}
 
@@ -373,20 +398,15 @@ nbd_newstyle_negotiation_dump(struct nbd_newstyle_negotiation *handshake)
 {
 	uint16_t flags = handshake->handshake_flags;
 
-	fprintf(stderr, "\tmagic: %#018lx\n", handshake->magic);
-	fprintf(stderr, "\tnewstyle_magic: %#018lx\n",
-		handshake->newstyle_magic);
-	fprintf(stderr, "\thandshake_flags: %#06x [", flags);
-	if (flags & NBD_FLAG_FIXED_NEWSTYLE)
-		fprintf(stderr, "FIXED_NEWSTYLE");
-	if ((flags & VALID_NEWSTYLE_FLAGS) == VALID_NEWSTYLE_FLAGS)
-		fprintf(stderr, "|");
-	if (flags & NBD_FLAG_NO_ZEROES)
-		fprintf(stderr, "NO_ZEROES");
-	fprintf(stderr, "]");
-	if (flags & ~VALID_NEWSTYLE_FLAGS)
-		fprintf(stderr, " (invalid)");
-	fprintf(stderr, "\n");
+	syslog(LOG_DEBUG, "\tmagic: %#018lx", handshake->magic);
+	syslog(LOG_DEBUG, "\tnewstyle_magic: %#018lx",
+	       handshake->newstyle_magic);
+	syslog(LOG_DEBUG, "\thandshake_flags: %#06x [%s%s%s]%s", flags,
+	       (flags & NBD_FLAG_FIXED_NEWSTYLE) ? "FIXED_NEWSTYLE" : "",
+	       ((flags & VALID_NEWSTYLE_FLAGS)
+		== VALID_NEWSTYLE_FLAGS) ? "|" : "",
+	       (flags & NBD_FLAG_NO_ZEROES) ? "NO_ZEROES" : "",
+	       (flags & ~VALID_NEWSTYLE_FLAGS) ? " (invalid)" : "");
 }
 
 static inline void
@@ -430,7 +450,7 @@ nbd_client_newstyle_handshake(struct nbd_client *client)
 	nbd_newstyle_negotiation_ntoh(&handshake);
 
 	if (!nbd_newstyle_negotiation_is_valid(&handshake)) {
-		warnx("%s: invalid handshake:", __func__);
+		syslog(LOG_ERR, "%s: invalid handshake", __func__);
 		nbd_newstyle_negotiation_dump(&handshake);
 		return FAILURE;
 	}
@@ -450,7 +470,7 @@ nbd_client_newstyle_handshake(struct nbd_client *client)
 	return SUCCESS;
 
  connection_fail:
-	warn("%s: connection failed", __func__);
+	syslog(LOG_ERR, "%s: connection failed: %m", __func__);
 	return FAILURE;
 }
 
@@ -502,7 +522,7 @@ nbd_client_send_option(struct nbd_client *client,
 	return SUCCESS;
 
  connection_fail:
-	warn("%s: connection failed", __func__);
+	syslog(LOG_ERR, "%s: connection failed: %m", __func__);
 	return FAILURE;
 }
 
@@ -527,13 +547,15 @@ nbd_option_reply_is_valid(struct nbd_option_reply *reply,
 	assert(option->option != NBD_OPTION_EXPORT_NAME);
 
 	if (reply->magic != NBD_OPTION_REPLY_MAGIC) {
-		warnx("%s: invalid magic: %#018lx (expected %#018lx)",
-		      __func__, reply->magic, NBD_OPTION_REPLY_MAGIC);
+		syslog(LOG_ERR,
+		       "%s: invalid magic: %#018lx (expected %#018lx)",
+		       __func__, reply->magic, NBD_OPTION_REPLY_MAGIC);
 		return false;
 	}
 	if (reply->option != opt) {
-		warnx("%s: unexpected option: %#010x (expected %#010x)",
-		      __func__, reply->option, opt);
+		syslog(LOG_ERR,
+		       "%s: unexpected option: %#010x (expected %#010x)",
+		       __func__, reply->option, opt);
 		return false;
 	}
 
@@ -606,21 +628,21 @@ nbd_option_reply_dump(struct nbd_option_reply *reply)
 	char const *option = nbd_option_reply_option_string(reply);
 	char const *type = nbd_option_reply_type_string(reply);
 
-	fprintf(stderr, "\tmagic: %#018lx\n", reply->magic);
+	syslog(LOG_DEBUG, "\tmagic: %#018lx", reply->magic);
 
 	if (option == NULL)
-		fprintf(stderr, "\toption: [unknown] %#010x (%d)\n",
-			reply->option, reply->option);
+		syslog(LOG_DEBUG, "\toption: [unknown] %#010x (%d)",
+		       reply->option, reply->option);
 	else
-		fprintf(stderr, "\toption: %s\n", option);
+		syslog(LOG_DEBUG, "\toption: %s", option);
 
 	if (type == NULL)
-		fprintf(stderr, "\ttype: [unknown] %#010x (%d)\n",
-			reply->type, reply->type);
+		syslog(LOG_DEBUG, "\ttype: [unknown] %#010x (%d)",
+		       reply->type, reply->type);
 	else
-		fprintf(stderr, "\ttype: %s\n", type);
+		syslog(LOG_DEBUG, "\ttype: %s", type);
 
-	fprintf(stderr, "\tlength: %u\n", reply->length);
+	syslog(LOG_DEBUG, "\tlength: %u", reply->length);
 }
 
 static int
@@ -649,7 +671,7 @@ nbd_client_recv_option_reply(struct nbd_client *client,
 	nbd_option_reply_ntoh(reply);
 
 	if (!nbd_option_reply_is_valid(reply, option)) {
-		warnx("%s: invalid option reply", __func__);
+		syslog(LOG_ERR, "%s: invalid option reply", __func__);
 		nbd_option_reply_dump(reply);
 		return FAILURE;
 	}
@@ -681,7 +703,7 @@ nbd_client_recv_option_reply(struct nbd_client *client,
 	return SUCCESS;
 
  connection_fail:
-	warn("%s: connection failed", __func__);
+	syslog(LOG_ERR, "%s: connection failed: %m", __func__);
 	return FAILURE;
 }
 
@@ -738,7 +760,7 @@ nbd_client_recv_export_info(struct nbd_client *client,
 	return SUCCESS;
 
  connection_fail:
-	warn("%s: connection failed", __func__);
+	syslog(LOG_ERR, "%s: connection failed: %m", __func__);
 	return FAILURE;
 }
 
@@ -753,22 +775,22 @@ nbd_client_negotiate_options_fixed_newstyle(struct nbd_client *client)
 
 	nbd_option_set_option(&option, NBD_OPTION_EXPORT_NAME);
 	if (nbd_client_send_option(client, &option, 0, NULL) == FAILURE) {
-		warnx("%s: sending option EXPORT_NAME failed", __func__);
+		syslog(LOG_ERR, "%s: sending option EXPORT_NAME failed",
+		       __func__);
 		return FAILURE;
 	}
 	if (nbd_client_recv_export_info(client, &info) == FAILURE) {
-		warnx("%s: receiving export info failed", __func__);
+		syslog(LOG_ERR, "%s: receiving export info failed",
+		       __func__);
 		return FAILURE;
 	}
 
-	if (!(info.transmission_flags & NBD_FLAG_SEND_FLUSH)) {
-		warnx("%s: server does not support FLUSH command", __func__);
-		//return FAILURE;
-	}
-	if (!(info.transmission_flags & NBD_FLAG_SEND_TRIM)) {
-		warnx("%s: server does not support TRIM command", __func__);
-		//return FAILURE;
-	}
+	if (!(info.transmission_flags & NBD_FLAG_SEND_FLUSH))
+		syslog(LOG_INFO, "%s: server does not support FLUSH command",
+		       __func__);
+	if (!(info.transmission_flags & NBD_FLAG_SEND_TRIM))
+		syslog(LOG_INFO, "%s: server does not support TRIM command",
+		       __func__);
 
 	return SUCCESS;
 }
@@ -795,27 +817,31 @@ nbd_client_negotiate_list_fixed_newstyle(struct nbd_client *client)
 	nbd_option_init(&option);
 	nbd_option_set_option(&option, NBD_OPTION_LIST);
 	if (nbd_client_send_option(client, &option, 0, NULL) == FAILURE) {
-		warnx("%s: sending option LIST failed", __func__);
+		syslog(LOG_ERR, "%s: sending option LIST failed", __func__);
 		return FAILURE;
 	}
 	while (true) {
 		rc = nbd_client_recv_option_reply(client, &option, &reply,
 						  BUFLEN, (uint8_t *)buf);
 		if (rc == FAILURE) {
-			warnx("%s: receiving option LIST reply failed",
-			      __func__);
+			syslog(LOG_ERR,
+			       "%s: receiving option LIST reply failed",
+			       __func__);
 			return FAILURE;
 		}
 		if (reply.type < 0) {
 			char const *msg =
 				nbd_option_reply_type_string(&reply);
 
-			if (msg == NULL)
-				warnx("%s: unknown server error (%d)\n"
-				      "\tbe32toh: %d", __func__,
-				      reply.type, be32toh(reply.type));
-			else
-				warnx("%s: server error: %s", __func__, msg);
+			if (msg == NULL) {
+				syslog(LOG_ERR, "%s: unknown server error (%d)",
+				       __func__, reply.type);
+				syslog(LOG_DEBUG, "\tbe32toh: %d",
+				       be32toh(reply.type));
+			} else {
+				syslog(LOG_ERR, "%s: server error: %s",
+				       __func__, msg);
+			}
 
 			nbd_option_reply_dump(&reply);
 
@@ -857,7 +883,8 @@ nbd_client_negotiate_list_fixed_newstyle(struct nbd_client *client)
 			if (len == -1 && errno == EINTR)
 				continue;
 			if (len != recvlen) {
-				warn("%s: connection failed", __func__);
+				syslog(LOG_ERR, "%s: connection failed: %m",
+				       __func__);
 				return FAILURE;
 			}
 			buf[recvlen] = '\0';
@@ -888,10 +915,10 @@ static inline void
 handshake_magic_dump(struct handshake_magic *handshake)
 {
 
-	fprintf(stderr, "\tmagic: %#018lx (expected %#018lx)\n",
-		handshake->magic, NBD_MAGIC);
-	fprintf(stderr, "\tstyle: %#018lx (expected %#018lx or %#018lx)\n",
-		handshake->style, NBD_OLDSTYLE_MAGIC, NBD_NEWSTYLE_MAGIC);
+	syslog(LOG_DEBUG, "\tmagic: %#018lx (expected %#018lx)",
+	       handshake->magic, NBD_MAGIC);
+	syslog(LOG_DEBUG, "\tstyle: %#018lx (expected %#018lx or %#018lx)",
+	       handshake->style, NBD_OLDSTYLE_MAGIC, NBD_NEWSTYLE_MAGIC);
 }
 
 int
@@ -910,7 +937,7 @@ nbd_client_negotiate(struct nbd_client *client)
 		if (len == -1 && errno == EINTR)
 			continue;
 		if (len == -1) {
-			warn("%s: connection failed", __func__);
+			syslog(LOG_ERR, "%s: connection failed: %m", __func__);
 			return FAILURE;
 		}
 		if (len == sizeof handshake)
@@ -920,16 +947,16 @@ nbd_client_negotiate(struct nbd_client *client)
 	handshake_magic_ntoh(&handshake);
 
 	if (handshake.magic != NBD_MAGIC) {
-		warnx("%s: handshake failed: invalid magic", __func__);
+		syslog(LOG_ERR, "%s: handshake failed: invalid magic", __func__);
 		return FAILURE;
 	}
 
 	if (handshake.style == NBD_OLDSTYLE_MAGIC) {
 
-		warnx("%s: oldstyle handshake detected", __func__);
+		syslog(LOG_INFO, "%s: oldstyle handshake detected", __func__);
 
 		if (nbd_client_oldstyle_handshake(client) == FAILURE) {
-			warnx("%s: handshake failed", __func__);
+			syslog(LOG_ERR, "%s: handshake failed", __func__);
 			return FAILURE;
 		}
 
@@ -937,16 +964,17 @@ nbd_client_negotiate(struct nbd_client *client)
 
 	} else if (handshake.style == NBD_NEWSTYLE_MAGIC) {
 
-		warnx("%s: newstyle handshake detected", __func__);
+		syslog(LOG_INFO, "%s: newstyle handshake detected", __func__);
 
 		if (nbd_client_newstyle_handshake(client) == FAILURE) {
-			warnx("%s: handshake failed", __func__);
+			syslog(LOG_ERR, "%s: handshake failed", __func__);
 			return FAILURE;
 		}
 
 		if (nbd_client_negotiate_options_fixed_newstyle(client)
 		    == FAILURE) {
-			warnx("%s: option negotiation failed", __func__);
+			syslog(LOG_ERR, "%s: option negotiation failed",
+			       __func__);
 			return FAILURE;
 		}
 
@@ -954,7 +982,7 @@ nbd_client_negotiate(struct nbd_client *client)
 
 	}
 
-	warnx("%s: handshake failed: unknown style:", __func__);
+	syslog(LOG_ERR, "%s: handshake failed: unknown style", __func__);
 	handshake_magic_dump(&handshake);
 
 	return FAILURE;
@@ -965,12 +993,12 @@ nbd_client_list(struct nbd_client *client)
 {
 
 	if (nbd_client_newstyle_handshake(client) == FAILURE) {
-		warnx("%s: handshake failed", __func__);
+		syslog(LOG_ERR, "%s: handshake failed", __func__);
 		return FAILURE;
 	}
 
 	if (nbd_client_negotiate_list_fixed_newstyle(client) == FAILURE) {
-		warnx("%s: server listing failed", __func__);
+		syslog(LOG_ERR, "%s: server listing failed", __func__);
 		return FAILURE;
 	}
 
@@ -1043,7 +1071,7 @@ nbd_client_send_request(struct nbd_client *client, uint16_t command,
 
 	len = send(sock, &request, sizeof request, MSG_NOSIGNAL);
 	if (len != sizeof request) {
-		warnx("%s: failed to send request header", __func__);
+		syslog(LOG_ERR, "%s: failed to send request header", __func__);
 		goto connection_fail;
 	}
 
@@ -1056,7 +1084,7 @@ nbd_client_send_request(struct nbd_client *client, uint16_t command,
 
 	len = send(sock, data, sendlen, MSG_NOSIGNAL);
 	if (len != sendlen) {
-		warnx("%s: failed to send request data", __func__);
+		syslog(LOG_ERR, "%s: failed to send request data", __func__);
 		goto connection_fail;
 	}
 
@@ -1066,7 +1094,7 @@ nbd_client_send_request(struct nbd_client *client, uint16_t command,
 	return SUCCESS;
 
  connection_fail:
-	warn("%s: connection failed", __func__);
+	syslog(LOG_ERR, "%s: connection failed: %m", __func__);
 	return FAILURE;
 }
 
@@ -1094,7 +1122,7 @@ nbd_client_send_flush(struct nbd_client *client, uint64_t handle)
 {
 
 	if (!(client->flags & NBD_FLAG_SEND_FLUSH)) {
-		warnx("%s: unsupported FLUSH operation", __func__);
+		syslog(LOG_NOTICE, "%s: unsupported FLUSH operation", __func__);
 		return EOPNOTSUPP;
 	}
 
@@ -1108,7 +1136,7 @@ nbd_client_send_trim(struct nbd_client *client, uint64_t handle,
 {
 
 	if (!(client->flags & NBD_FLAG_SEND_TRIM)) {
-		warnx("%s: unsupported TRIM operation", __func__);
+		syslog(LOG_NOTICE, "%s: unsupported TRIM operation", __func__);
 		return EOPNOTSUPP;
 	}
 
@@ -1138,8 +1166,8 @@ nbd_reply_is_valid(struct nbd_reply *reply)
 {
 
 	if (reply->magic != NBD_REPLY_MAGIC) {
-		warnx("%s: invalid magic: %#010x (expected %#010x)",
-		      __func__, reply->magic, NBD_REPLY_MAGIC);
+		syslog(LOG_ERR, "%s: invalid magic: %#010x (expected %#010x)",
+		       __func__, reply->magic, NBD_REPLY_MAGIC);
 		return false;
 	}
 
@@ -1175,16 +1203,16 @@ nbd_reply_dump(struct nbd_reply *reply)
 {
 	char const *error = nbd_reply_error_string(reply);
 
-	fprintf(stderr, "\tmagic: %#010x\n", reply->magic);
+	syslog(LOG_DEBUG, "\tmagic: %#010x", reply->magic);
 
 	if (error == NULL)
-		fprintf(stderr, "\terror: [unknown] %#010x (%d)\n",
-			reply->error, reply->error);
+		syslog(LOG_DEBUG, "\terror: [unknown] %#010x (%d)",
+		       reply->error, reply->error);
 	else
-		fprintf(stderr, "\terror: %s (%s)\n",
-			strerror(reply->error), error);
+		syslog(LOG_DEBUG, "\terror: %s (%s)",
+		       strerror(reply->error), error);
 
-	fprintf(stderr, "\thandle: %#018lx\n", reply->handle);
+	syslog(LOG_DEBUG, "\thandle: %#018lx", reply->handle);
 }
 
 int
@@ -1203,7 +1231,7 @@ nbd_client_recv_reply_header(struct nbd_client *client, uint64_t *handle)
 		if (len == -1 && errno == EINTR)
 			continue;
 		if (len != sizeof reply) {
-			warn("%s: connection failed", __func__);
+			syslog(LOG_ERR, "%s: connection failed: %m", __func__);
 			return FAILURE;
 		}
 		break;
@@ -1212,7 +1240,7 @@ nbd_client_recv_reply_header(struct nbd_client *client, uint64_t *handle)
 	nbd_reply_ntoh(&reply);
 
 	if (!nbd_reply_is_valid(&reply)) {
-		warnx("%s: invalid reply:", __func__);
+		syslog(LOG_ERR, "%s: invalid reply", __func__);
 		goto bad_reply;
 	}
 
@@ -1220,10 +1248,11 @@ nbd_client_recv_reply_header(struct nbd_client *client, uint64_t *handle)
 	case SUCCESS:
 		break;
 	case NBD_EINVAL:
-		warnx("%s: server replied invalid command usage", __func__);
+		syslog(LOG_WARNING, "%s: server replied invalid command usage",
+		       __func__);
 		return EINVAL;
 	default:
-		warnx("%s: request error:", __func__);
+		syslog(LOG_ERR, "%s: request error", __func__);
 		goto bad_reply;
 	}
 
@@ -1261,7 +1290,7 @@ nbd_client_recv_reply_data(struct nbd_client *client, size_t length,
 		if (len == -1 && errno == EINTR)
 			continue;
 		if (len != recvlen) {
-			warn("%s: connection failed", __func__);
+			syslog(LOG_ERR, "%s: connection failed: %m", __func__);
 			return FAILURE;
 		}
 		break;

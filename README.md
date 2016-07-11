@@ -1,10 +1,16 @@
 ## Synopsis
 
 The Network Block Device is a Linux-originated lightweight block access
-protocol that allows one to export a block device to a client.  This client
-is designed to run on top of FreeBSD's GEOM Gate device driver, keeping the
-network client in a userland daemon rather than in a kernel module.
+protocol that allows one to export a block device to a client.
+
+This client is designed to run on top of FreeBSD's GEOM Gate device driver,
+keeping the network client in a userland daemon rather than in a kernel
+module.
+
 Capsicum is used to limit the capabilities of the client once connected.
+
+Messages are logged via syslog, and to stdout and stderr when running
+interactively.
 
 ## Caveats
 

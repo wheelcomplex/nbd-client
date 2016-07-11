@@ -6,12 +6,12 @@
 #include <geom/gate/g_gate.h>
 
 #include <assert.h>
-#include <err.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <syslog.h>
 #include <unistd.h>
 
 #include "check.h"
@@ -27,7 +27,9 @@ ggate_load_module()
 	if (kldload("geom_gate") == FAILURE
 	    || modfind("g_gate") == FAILURE) {
 		if (errno != EEXIST) {
-			warnx("geom_gate module not available!");
+			syslog(LOG_ERR,
+			       "%s: failed to load geom_gate module: %m",
+			       __func__);
 			return FAILURE;
 		}
 	}
@@ -48,7 +50,8 @@ ggate_context_alloc()
 	ctx = (struct ggate_context *)malloc(sizeof (struct ggate_context));
 	if (ctx == NULL) {
 		assert(errno == ENOMEM);
-		warn("%s: failed to allocate ggate context", __func__);
+		syslog(LOG_ERR, "%s: failed to allocate ggate context: %m",
+		       __func__);
 	}
 
 	return ctx;
@@ -76,8 +79,9 @@ ggate_context_open(struct ggate_context *ctx)
 
 	fd = open("/dev/" G_GATE_CTL_NAME, O_RDWR);
 	if (fd == FAILURE) {
-		warn("%s: failed to open control device (/dev/%s)",
-		     __func__, G_GATE_CTL_NAME);
+		syslog(LOG_ERR,
+		       "%s: failed to open control device (/dev/%s): %m",
+		       __func__, G_GATE_CTL_NAME);
 		return FAILURE;
 	}
 
@@ -108,15 +112,16 @@ ggate_context_rights_limit(struct ggate_context *ctx)
 
 	if (cap_rights_limit(ctl, cap_rights_init(&rights, CAP_IOCTL))
 	    == FAILURE) {
-		warn("%s: failed to limit capabilities (/dev/%s)",
-		     __func__, G_GATE_CTL_NAME);
+		syslog(LOG_ERR,
+		       "%s: failed to limit capabilities (/dev/%s): %m",
+		       __func__, G_GATE_CTL_NAME);
 		return FAILURE;
 	}
 
 	if (cap_ioctls_limit(ctl, cmds, sizeof cmds / sizeof cmds[0])
 	    == FAILURE) {
-		warn("%s: failed to limit ioctls (/dev/%s)",
-		     __func__, G_GATE_CTL_NAME);
+		syslog(LOG_ERR, "%s: failed to limit ioctls (/dev/%s): %m",
+		       __func__, G_GATE_CTL_NAME);
 		return FAILURE;
 	}
 
@@ -139,7 +144,8 @@ ggate_context_ioctl(struct ggate_context *ctx, uint64_t req, void *data)
 		if (errno == EINTR)
 			continue;
 
-		warn("%s: ioctl failed (/dev/%s)", __func__, G_GATE_CTL_NAME);
+		syslog(LOG_ERR, "%s: ioctl failed (/dev/%s): %m",
+		       __func__, G_GATE_CTL_NAME);
 
 		return FAILURE;
 	}
@@ -151,17 +157,17 @@ static inline void
 g_gate_ctl_create_dump(struct g_gate_ctl_create *ggioc)
 {
 
-	fprintf(stderr, "\tgctl_version: %u\n", ggioc->gctl_version);
-	fprintf(stderr, "\tgctl_mediasize: %ld\n", ggioc->gctl_mediasize);
-	fprintf(stderr, "\tgctl_sectorsize: %u\n", ggioc->gctl_sectorsize);
-	fprintf(stderr, "\tgctl_flags: %#010x\n", ggioc->gctl_flags);
-	fprintf(stderr, "\tgctl_maxcount: %u\n", ggioc->gctl_maxcount);
-	fprintf(stderr, "\tgctl_timeout: %u\n", ggioc->gctl_timeout);
-	fprintf(stderr, "\tgctl_name: %.*s\n", NAME_MAX, ggioc->gctl_name);
-	fprintf(stderr, "\tgctl_info: %.*s\n", G_GATE_INFOSIZE, ggioc->gctl_info);
-	fprintf(stderr, "\tgctl_readprov: %.*s\n", NAME_MAX, ggioc->gctl_readprov);
-	fprintf(stderr, "\tgctl_readoffset: %ld\n", ggioc->gctl_readoffset);
-	fprintf(stderr, "\tgctl_unit: %d\n", ggioc->gctl_unit);
+	syslog(LOG_DEBUG, "\tgctl_version: %u", ggioc->gctl_version);
+	syslog(LOG_DEBUG, "\tgctl_mediasize: %ld", ggioc->gctl_mediasize);
+	syslog(LOG_DEBUG, "\tgctl_sectorsize: %u", ggioc->gctl_sectorsize);
+	syslog(LOG_DEBUG, "\tgctl_flags: %#010x", ggioc->gctl_flags);
+	syslog(LOG_DEBUG, "\tgctl_maxcount: %u", ggioc->gctl_maxcount);
+	syslog(LOG_DEBUG, "\tgctl_timeout: %u", ggioc->gctl_timeout);
+	syslog(LOG_DEBUG, "\tgctl_name: %.*s", NAME_MAX, ggioc->gctl_name);
+	syslog(LOG_DEBUG, "\tgctl_info: %.*s", G_GATE_INFOSIZE, ggioc->gctl_info);
+	syslog(LOG_DEBUG, "\tgctl_readprov: %.*s", NAME_MAX, ggioc->gctl_readprov);
+	syslog(LOG_DEBUG, "\tgctl_readoffset: %ld", ggioc->gctl_readoffset);
+	syslog(LOG_DEBUG, "\tgctl_unit: %d", ggioc->gctl_unit);
 }
 
 static int
@@ -174,8 +180,8 @@ limit_create_ioctl(struct ggate_context *ctx)
 
 	if (cap_ioctls_limit(ctx->ctl, cmds, sizeof cmds / sizeof cmds[0])
 	    == FAILURE) {
-		warn("%s: failed to limit ioctls (/dev/%s)", __func__,
-		     G_GATE_CTL_NAME);
+		syslog(LOG_ERR, "%s: failed to limit ioctls (/dev/%s): %m",
+		       __func__, G_GATE_CTL_NAME);
 		return FAILURE;
 	}
 
@@ -207,7 +213,7 @@ ggate_context_create_device(struct ggate_context *ctx, char const *host,
 		 "%s:%s %s (nbd)", host, port, path);
 
 	if (ggate_context_ioctl(ctx, G_GATE_CMD_CREATE, &ggioc) == FAILURE) {
-		warnx("%s: failed to create ggate device", __func__);
+		syslog(LOG_ERR, "%s: failed to create ggate device", __func__);
 		g_gate_ctl_create_dump(&ggioc);
 		return FAILURE;
 	}
@@ -216,8 +222,13 @@ ggate_context_create_device(struct ggate_context *ctx, char const *host,
 		return FAILURE;
 
 	if (unit == G_GATE_UNIT_AUTO) {
-		printf("%s%u\n", G_GATE_PROVIDER_NAME, ggioc.gctl_unit);
-		fflush(stdout);
+		if (isatty(fileno(stdout))) {
+			printf("%s%u\n", G_GATE_PROVIDER_NAME, ggioc.gctl_unit);
+			fflush(stdout);
+		} else {
+			syslog(LOG_INFO, "%s: %s%u", __func__,
+			       G_GATE_PROVIDER_NAME, ggioc.gctl_unit);
+		}
 	}
 
 	ctx->unit = ggioc.gctl_unit;
@@ -237,7 +248,7 @@ ggate_context_destroy_device(struct ggate_context *ctx, bool force)
 	};
 
 	if (ggate_context_ioctl(ctx, G_GATE_CMD_DESTROY, &ggioc) == FAILURE) {
-		warnx("%s: failed to destroy ggate device", __func__);
+		syslog(LOG_ERR, "%s: failed to destroy ggate device", __func__);
 		return FAILURE;
 	}
 
@@ -258,7 +269,8 @@ ggate_context_cancel(struct ggate_context *ctx, uintptr_t seq)
 	};
 
 	if (ggate_context_ioctl(ctx, G_GATE_CMD_CANCEL, &ggioc) == FAILURE) {
-		warnx("%s: failed to cancel ggate command %lx", __func__, seq);
+		syslog(LOG_ERR, "%s: failed to cancel ggate command %lx",
+		       __func__, seq);
 		return FAILURE;
 	}
 

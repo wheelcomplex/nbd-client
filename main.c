@@ -15,7 +15,6 @@
 #include <Block.h>
 #include <assert.h>
 #include <errno.h>
-#include <err.h>
 #include <math.h>
 #include <netdb.h>
 #include <signal.h>
@@ -23,6 +22,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <syslog.h>
 #include <unistd.h>
 
 #include "check.h"
@@ -102,7 +102,8 @@ run_loop(ggate_context_t ggate, nbd_client_t nbd)
 	sa.sa_sigaction = signal_handler;
 	sa.sa_flags = SA_SIGINFO;
 	if (sigaction(SIGINT, &sa, NULL) == FAILURE) {
-		warn("%s: failed to install signal handler", __func__);
+		syslog(LOG_ERR, "%s: failed to install signal handler: %m",
+		       __func__);
 		return FAILURE;
 	}
 
@@ -124,9 +125,9 @@ run_loop(ggate_context_t ggate, nbd_client_t nbd)
 
 		case ENXIO:
 		default:
-			warnc(ggio.gctl_error,
-			      "%s: ggate control operation failed (/dev/%s)",
-			      __func__, G_GATE_CTL_NAME);
+			syslog(LOG_ERR,
+			       "%s: ggate control operation failed: %s",
+			       __func__, strerror(ggio.gctl_error));
 			goto fail;
 		}
 
@@ -155,8 +156,8 @@ run_loop(ggate_context_t ggate, nbd_client_t nbd)
 			break;
 
 		default:
-			warnx("%s: unsupported operation: %d",
-			      __func__, ggio.gctl_cmd);
+			syslog(LOG_NOTICE, "%s: unsupported operation: %d",
+			       __func__, ggio.gctl_cmd);
 			result = EOPNOTSUPP;
 			break;
 		}
@@ -170,11 +171,13 @@ run_loop(ggate_context_t ggate, nbd_client_t nbd)
 			goto done;
 
 		case FAILURE:
-			warnx("%s: nbd client error", __func__);
+			syslog(LOG_ERR, "%s: nbd client error", __func__);
 			goto fail;
 
 		default:
-			warnx("%s: unhandled nbd command result", __func__);
+			syslog(LOG_ERR,
+			       "%s: unhandled nbd command result: %d",
+			       __func__, result);
 			goto fail;
 		}
 
@@ -193,25 +196,27 @@ run_loop(ggate_context_t ggate, nbd_client_t nbd)
 				ggio.gctl_error = EOPNOTSUPP;
 				goto done;
 			}
-			warnx("%s: server rejected command request:",
-			      __func__);
+			syslog(LOG_ERR,
+			       "%s: server rejected command request",
+			       __func__);
 			name = bio_cmd_string(ggio.gctl_cmd);
 			if (name == NULL)
-				fprintf(stderr, "\tcommand: %u (unknown)\n",
-					ggio.gctl_cmd);
+				syslog(LOG_DEBUG, "\tcommand: %u (unknown)",
+				       ggio.gctl_cmd);
 			else
-				fprintf(stderr, "\tcommand: %s\n", name);
-			fprintf(stderr, "\toffset: %lx (%ld)\n",
-				ggio.gctl_offset, ggio.gctl_offset);
-			fprintf(stderr, "\tlength: %lx (%lu)\n",
-				ggio.gctl_length, ggio.gctl_length);
+				syslog(LOG_DEBUG, "\tcommand: %s", name);
+			syslog(LOG_DEBUG, "\toffset: %lx (%ld)",
+			       ggio.gctl_offset, ggio.gctl_offset);
+			syslog(LOG_DEBUG, "\tlength: %lx (%lu)",
+			       ggio.gctl_length, ggio.gctl_length);
 			goto fail;
 		}
 
 		default:
 			if (disconnect)
 				return SUCCESS;
-			warnx("%s: error receiving reply header", __func__);
+			syslog(LOG_ERR, "%s: error receiving reply header",
+			       __func__);
 			goto fail;
 		}
 
@@ -223,15 +228,16 @@ run_loop(ggate_context_t ggate, nbd_client_t nbd)
 		if (result == FAILURE) {
 			if (disconnect)
 				return SUCCESS;
-			warnx("%s: error receiving reply data",
-			      __func__);
+			syslog(LOG_ERR, "%s: error receiving reply data",
+			       __func__);
 			goto fail;
 		}
 
 	done:
 		result = ggate_context_ioctl(ggate, G_GATE_CMD_DONE, &ggio);
 		if (result == FAILURE) {
-			warnx("%s: could not complete transaction", __func__);
+			syslog(LOG_ERR, "%s: could not complete transaction",
+			       __func__);
 			goto fail;
 		}
 
@@ -245,9 +251,9 @@ run_loop(ggate_context_t ggate, nbd_client_t nbd)
 
 		case ENXIO:
 		default:
-			warnc(ggio.gctl_error,
-			      "%s: ggate control operation failed (/dev/%s)",
-			      __func__, G_GATE_CTL_NAME);
+			syslog(LOG_ERR,
+			       "%s: ggate control operation failed: %s",
+			       __func__, strerror(ggio.gctl_error));
 			goto fail;
 		}
 	}
@@ -267,7 +273,7 @@ enter_capability_mode()
 	fclose(stdin);
 
 	if (cap_enter() == FAILURE) {
-		warn("cannot enter capabilities mode");
+		syslog(LOG_ERR, "%s: cannot enter capability mode", __func__);
 		return FAILURE;
 	}
 
@@ -280,6 +286,7 @@ main(int argc, char *argv[])
 	ggate_context_t ggate;
 	nbd_client_t nbd;
 	char const *host, *port;
+	char ident[128]; // arbitrary length limit
 	struct addrinfo *ai;
 	uint64_t size;
 	int result, retval;
@@ -289,8 +296,7 @@ main(int argc, char *argv[])
 	nbd = NULL;
 
 	/*
-	 * Check for the correct number of arguments and ensure the
-	 * geom_gate module is loaded.
+	 * Check the command line arguments.
 	 */
 
 	if (argc < 2 || argc > 3) {
@@ -303,6 +309,24 @@ main(int argc, char *argv[])
 		port = NBD_DEFAULT_PORT;
 	else
 		port = argv[2];
+	snprintf(ident, sizeof ident, "%s (%s:%s)", getprogname(), host, port);
+
+	/*
+	 * Direct log messages to stderr if stderr is a TTY. Otherwise, log
+	 * to syslog as well as to the console.
+	 *
+	 * LOG_NDELAY makes sure the connection to syslogd is opened before
+	 * entering capability mode.
+	 */
+
+	if (isatty(fileno(stderr)))
+		openlog(NULL, LOG_NDELAY | LOG_PERROR, LOG_USER);
+	else
+		openlog(ident, LOG_NDELAY | LOG_CONS | LOG_PID, LOG_DAEMON);
+
+	/*
+	 * Ensure the geom_gate module is loaded.
+	 */
 
 	if (ggate_load_module() == FAILURE)
 		return EXIT_FAILURE;
@@ -322,12 +346,12 @@ main(int argc, char *argv[])
 
 	ggate_context_init(ggate);
 	if (ggate_context_open(ggate) == FAILURE) {
-		warnx("cannot open ggate context");
+		syslog(LOG_ERR, "%s: cannot open ggate context", __func__);
 		goto close;
 	}
 
 	if (nbd_client_init(nbd) == FAILURE) {
-		warnx("cannot create socket");
+		syslog(LOG_ERR, "%s: cannot create socket", __func__);
 		goto close;
 	}
 
@@ -335,8 +359,10 @@ main(int argc, char *argv[])
 	 * Connect to the nbd server.
 	 */
 
-	if (getaddrinfo(host, port, NULL, &ai) != SUCCESS) {
-		warn("failed to locate server (%s)", host);
+	result = getaddrinfo(host, port, NULL, &ai);
+	if (result != SUCCESS) {
+		syslog(LOG_ERR, "%s: failed to locate server (%s:%s): %s",
+		       __func__, host, port, gai_strerror(result));
 		goto close;
 	}
 
@@ -344,7 +370,8 @@ main(int argc, char *argv[])
 	freeaddrinfo(ai);
 
 	if (result == FAILURE) {
-		warnx("failed to connect to the server");
+		syslog(LOG_ERR, "%s: failed to connect to server (%s:%s)",
+		       __func__, host, port);
 		goto close;
 	}
 
@@ -366,7 +393,7 @@ main(int argc, char *argv[])
 	 */
 
 	if (nbd_client_negotiate(nbd) == FAILURE) {
-		warnx("failed to negotiate options");
+		syslog(LOG_ERR, "%s: failed to negotiate options", __func__);
 		goto disconnect;
 	}
 
@@ -379,7 +406,7 @@ main(int argc, char *argv[])
 	if (ggate_context_create_device(ggate, host, NBD_DEFAULT_PORT, "",
 					size, DEFAULT_SECTOR_SIZE,
 					DEFAULT_GGATE_FLAGS) == FAILURE) {
-		warnx("failed to create ggate device");
+		syslog(LOG_ERR, "%s:failed to create ggate device", __func__);
 		goto destroy;
 	}
 
@@ -390,7 +417,7 @@ main(int argc, char *argv[])
 	retval = run_loop(ggate, nbd);
 
 	if (disconnect)
-		warnx("interrupted");
+		syslog(LOG_WARNING, "%s: interrupted", __func__);
 
 	/*
 	 * Exit cleanly.
@@ -416,6 +443,9 @@ main(int argc, char *argv[])
  cleanup:
 	nbd_client_free(nbd);
 	ggate_context_free(ggate);
+
+	if (retval != SUCCESS)
+		syslog(LOG_CRIT, "%s: device connection failed", __func__);
 
 	return retval;
 }
