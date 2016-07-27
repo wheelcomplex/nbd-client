@@ -1,9 +1,9 @@
+#include <sys/param.h>
 #include <sys/bio.h>
 #include <sys/capsicum.h>
 #include <sys/endian.h>
 #include <sys/socket.h>
 #include <sys/syslimits.h>
-#include <sys/types.h>
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
