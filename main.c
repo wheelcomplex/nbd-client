@@ -39,7 +39,7 @@ static void
 usage()
 {
 
-	fprintf(stderr, "usage: %s host [port]\n", getprogname());
+	fprintf(stderr, "usage: %s [-f] host [port]\n", getprogname());
 }
 
 static volatile sig_atomic_t disconnect = 0;
@@ -289,9 +289,11 @@ main(int argc, char *argv[])
 	char ident[128]; // arbitrary length limit
 	struct addrinfo *ai;
 	uint64_t size;
+	bool daemonize;
 	int result, retval;
 
 	retval = EXIT_FAILURE;
+	daemonize = true;
 	ggate = NULL;
 	nbd = NULL;
 
@@ -299,16 +301,31 @@ main(int argc, char *argv[])
 	 * Check the command line arguments.
 	 */
 
-	if (argc < 2 || argc > 3) {
+	while ((result = getopt(argc, argv, "f")) != -1) {
+		switch (result) {
+		case 'f':
+			daemonize = false;
+			break;
+		case '?':
+		default:
+			usage();
+			return EXIT_FAILURE;
+		}
+	}
+	argc -= optind;
+	argv += optind;
+
+	if (argc < 1 || argc > 2) {
 		usage();
 		return EXIT_FAILURE;
 	}
 
-	host = argv[1];
+	host = argv[0];
 	if (argc == 2)
-		port = NBD_DEFAULT_PORT;
-	else
 		port = argv[2];
+	else
+		port = NBD_DEFAULT_PORT;
+
 	snprintf(ident, sizeof ident, "%s (%s:%s)", getprogname(), host, port);
 
 	/*
@@ -408,6 +425,19 @@ main(int argc, char *argv[])
 					DEFAULT_GGATE_FLAGS) == FAILURE) {
 		syslog(LOG_ERR, "%s:failed to create ggate device", __func__);
 		goto destroy;
+	}
+
+	/*
+	 * Try to daemonize now that the connection has been established,
+	 * unless instructed to stay in the foreground.
+	 */
+
+	if (daemonize) {
+		if (daemon(0, 0) == FAILURE) {
+			syslog(LOG_ERR, "%s: failed to daemonize: %m",
+			       __func__);
+			goto close;
+		}
 	}
 
 	/*

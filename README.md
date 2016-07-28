@@ -12,6 +12,9 @@ Capsicum is used to limit the capabilities of the client once connected.
 Messages are logged via syslog, and to stdout and stderr when running
 interactively.
 
+The client immediately daemonizes unless passed the `-f` flag, in which
+case it remains running in the foreground.
+
 ## Caveats
 
 * TLS and other extensions are not currently supported.
