@@ -8,6 +8,11 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 
+#ifdef HAVE_LIBCASPER
+#include <libcasper.h>
+#include <casper/cap_dns.h>
+#endif
+
 #include <geom/gate/g_gate.h>
 
 #include <machine/param.h>
@@ -265,6 +270,40 @@ run_loop(ggate_context_t ggate, nbd_client_t nbd)
 	return FAILURE;
 }
 
+#ifdef HAVE_LIBCASPER
+static int
+casper_dns_lookup(char const *host, char const *port, struct addrinfo **res)
+{
+	cap_channel_t *casper, *casper_dns;
+	int result;
+
+	casper = cap_init();
+	if (casper == NULL) {
+		syslog(LOG_ERR, "%s: failed to initialize Casper: %m",
+		       __func__);
+		return FAILURE;
+	}
+
+	casper_dns = cap_service_open(casper, "system.dns");
+	cap_close(casper);
+	if (casper_dns == NULL) {
+		syslog(LOG_ERR, "%s: failed to open system.dns service: %m",
+		       __func__);
+		return FAILURE;
+	}
+
+	result = cap_getaddrinfo(casper_dns, host, port, NULL, res);
+	cap_close(casper_dns);
+	if (result != SUCCESS) {
+		syslog(LOG_ERR, "%s: failed to lookup address (%s:%s): %s",
+		       __func__, host, port, gai_strerror(result));
+		return FAILURE;
+	}
+
+	return SUCCESS;
+}
+#endif
+
 static int
 enter_capability_mode()
 {
@@ -376,12 +415,17 @@ main(int argc, char *argv[])
 	 * Connect to the nbd server.
 	 */
 
+#ifdef HAVE_LIBCASPER
+	if (casper_dns_lookup(host, port, &ai) == FAILURE)
+		goto close;
+#else
 	result = getaddrinfo(host, port, NULL, &ai);
 	if (result != SUCCESS) {
 		syslog(LOG_ERR, "%s: failed to locate server (%s:%s): %s",
 		       __func__, host, port, gai_strerror(result));
 		goto close;
 	}
+#endif
 
 	result = nbd_client_connect(nbd, ai);
 	freeaddrinfo(ai);
