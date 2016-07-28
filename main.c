@@ -322,7 +322,7 @@ main(int argc, char *argv[])
 
 	host = argv[0];
 	if (argc == 2)
-		port = argv[2];
+		port = argv[1];
 	else
 		port = NBD_DEFAULT_PORT;
 
