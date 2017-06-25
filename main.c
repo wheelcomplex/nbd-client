@@ -17,7 +17,6 @@
 
 #include <machine/param.h>
 
-#include <Block.h>
 #include <assert.h>
 #include <errno.h>
 #include <math.h>
@@ -49,14 +48,11 @@ usage()
 
 static volatile sig_atomic_t disconnect = 0;
 
-typedef void (^disconnect_action_t)(void);
-static disconnect_action_t disconnect_action;
-
 static void
 signal_handler(int sig, siginfo_t *sinfo, void *uap)
 {
 
-	disconnect_action();
+	disconnect = 1;
 }
 
 static inline char const *
@@ -85,189 +81,329 @@ bio_cmd_string(uint16_t cmd)
 	}
 }
 
+enum loop_state {
+	SETUP,
+	START,
+	DO_CMD,
+	RECV_HEADER,
+	RECV_DATA,
+	END_CMD,
+	FINISHED,
+	FAIL
+};
+
+struct loop_context {
+	ggate_context_t ggate;
+	nbd_client_t nbd;
+	struct g_gate_ctl_io ggio;
+	uint8_t *buf;
+	size_t buflen;
+	int result;
+	enum loop_state state;
+};
+
+static inline void
+init_ctx(struct loop_context *ctx,
+		 ggate_context_t ggate,
+		 nbd_client_t nbd)
+{
+
+	ctx->ggate = ggate;
+	ctx->nbd = nbd;
+	ctx->ggio = (struct g_gate_ctl_io){
+		.gctl_version = G_GATE_VERSION,
+		.gctl_unit = ggate_context_get_unit(ggate),
+	};
+	ctx->buf = NULL;
+	ctx->buflen = 0;
+	ctx->state = SETUP;
+}
+
+static inline void
+loop_setup(struct loop_context *ctx,
+		   uint8_t *buf, size_t buflen)
+{
+
+	ctx->ggio.gctl_data = buf;
+	ctx->ggio.gctl_length = buflen;
+	ctx->ggio.gctl_error = 0;
+	ctx->state = START;
+}
+
+static inline int
+ggioctl(struct loop_context *ctx, uint64_t req)
+{
+
+	return ggate_context_ioctl(ctx->ggate, req, &ctx->ggio);
+}
+
+static inline void
+loop_start(struct loop_context *ctx)
+{
+	int result;
+
+	result = ggioctl(ctx, G_GATE_CMD_START);
+
+	if (result == FAILURE) {
+		ctx->state = FAIL;
+	}
+	else {
+		switch (ctx->ggio.gctl_error) {
+		case SUCCESS:
+			ctx->state = DO_CMD;
+			break;
+
+		case ECANCELED:
+			ctx->state = FINISHED;
+			break;
+
+		case ENXIO:
+		default:
+			syslog(LOG_ERR, "%s: ggate control operation failed: %s",
+				   __func__, strerror(ctx->ggio.gctl_error));
+			ctx->state = FAIL;
+			break;
+		}
+	}
+}
+
+static inline int
+nbdcmd(struct loop_context *ctx)
+{
+
+	switch (ctx->ggio.gctl_cmd) {
+	case BIO_READ:
+		return nbd_client_send_read(ctx->nbd,
+									ctx->ggio.gctl_seq,
+									ctx->ggio.gctl_offset,
+									ctx->ggio.gctl_length);
+
+	case BIO_WRITE:
+		return nbd_client_send_write(ctx->nbd,
+									 ctx->ggio.gctl_seq,
+									 ctx->ggio.gctl_offset,
+									 ctx->ggio.gctl_length,
+									 ctx->buflen, ctx->buf);
+
+	case BIO_DELETE:
+		return nbd_client_send_trim(ctx->nbd,
+									ctx->ggio.gctl_seq,
+									ctx->ggio.gctl_offset,
+									ctx->ggio.gctl_length);
+
+	case BIO_FLUSH:
+		return nbd_client_send_flush(ctx->nbd, ctx->ggio.gctl_seq);
+
+	default:
+		syslog(LOG_NOTICE, "%s: unsupported operation: %d",
+			   __func__, ctx->ggio.gctl_cmd);
+		return EOPNOTSUPP;
+	}
+}
+
+static inline void
+loop_command(struct loop_context *ctx)
+{
+	int result;
+
+	result = nbdcmd(ctx);
+
+	switch (result) {
+	case SUCCESS:
+		ctx->state = RECV_HEADER;
+		break;
+
+	case EOPNOTSUPP:
+		ctx->ggio.gctl_error = EOPNOTSUPP;
+		ctx->state = END_CMD;
+		break;
+
+	case FAILURE:
+		syslog(LOG_ERR, "%s: nbd client error", __func__);
+		ctx->state = FAIL;
+		break;
+
+	default:
+		syslog(LOG_ERR, "%s: unhandled nbd command result: %d",
+			   __func__, result);
+		ctx->state = FAIL;
+		break;
+	}
+}
+
+static inline void
+hdrinval(struct loop_context* ctx)
+{
+	char const *name;
+
+	if (ctx->ggio.gctl_cmd == BIO_DELETE) {
+		// Some servers lie about support for TRIM.
+		nbd_client_disable_trim(ctx->nbd);
+		ctx->ggio.gctl_error = EOPNOTSUPP;
+		ctx->state = END_CMD;
+	}
+	else {
+		syslog(LOG_ERR, "%s: server rejected command request", __func__);
+
+		name = bio_cmd_string(ctx->ggio.gctl_cmd);
+
+		if (name == NULL)
+			syslog(LOG_DEBUG, "\tcommand: %u (unknown)", ctx->ggio.gctl_cmd);
+		else
+			syslog(LOG_DEBUG, "\tcommand: %s", name);
+
+		syslog(LOG_DEBUG, "\toffset: %lx (%ld)",
+			   ctx->ggio.gctl_offset, ctx->ggio.gctl_offset);
+		syslog(LOG_DEBUG, "\tlength: %lx (%lu)",
+			   ctx->ggio.gctl_length, ctx->ggio.gctl_length);
+
+		ctx->state = FAIL;
+	}
+}
+
+static inline void
+loop_recv_header(struct loop_context* ctx)
+{
+	int result;
+
+	result = nbd_client_recv_reply_header(ctx->nbd, &ctx->ggio.gctl_seq);
+
+	switch (result) {
+	case SUCCESS:
+		ctx->state = (ctx->ggio.gctl_cmd == BIO_READ) ? RECV_DATA : END_CMD;
+		break;
+
+	case EINVAL:
+		hdrinval(ctx);
+		break;
+
+	default:
+		if (disconnect) {
+			ctx->state = FINISHED;
+		}
+		else {
+			syslog(LOG_ERR, "%s: error receiving reply header", __func__);
+			ctx->state = FAIL;
+		}
+		break;
+	}
+}
+
+static inline void
+loop_recv_data(struct loop_context *ctx)
+{
+	int result;
+
+	result = nbd_client_recv_reply_data(ctx->nbd,
+										ctx->ggio.gctl_length,
+										ctx->buflen, ctx->buf);
+
+	if (result == FAILURE) {
+		if (disconnect) {
+			ctx->state = FINISHED;
+		}
+		else {
+			syslog(LOG_ERR, "%s: error receiving reply data", __func__);
+			ctx->state = FAIL;
+		}
+	}
+	else {
+		ctx->state = END_CMD;
+	}
+}
+
+static inline void
+loop_end_command(struct loop_context *ctx)
+{
+	int result;
+
+	result = ggioctl(ctx, G_GATE_CMD_DONE);
+
+	if (result == FAILURE) {
+		syslog(LOG_ERR, "%s: could not complete transaction", __func__);
+		ctx->state = FAIL;
+	}
+	else {
+		switch (ctx->ggio.gctl_error) {
+		case SUCCESS:
+		case EOPNOTSUPP:
+			ctx->state = SETUP;
+			break;
+
+		case ECANCELED:
+			ctx->state = FINISHED;
+			break;
+
+		case ENXIO:
+		default:
+			syslog(LOG_ERR, "%s: ggate control operation failed: %s",
+				   __func__, strerror(ctx->ggio.gctl_error));
+			ctx->state = FAIL;
+			break;
+		}
+	}
+}
+
 int
 run_loop(ggate_context_t ggate, nbd_client_t nbd)
 {
 	struct sigaction sa;
-	struct g_gate_ctl_io ggio;
 	uint8_t buf[MAXPHYS];
-	int result;
-
-	ggio = (struct g_gate_ctl_io){
-		.gctl_version = G_GATE_VERSION,
-		.gctl_unit = ggate_context_get_unit(ggate),
-	};
-
-	disconnect_action = ^{
-
-		nbd_client_set_disconnect(nbd, true);
-		disconnect = 1;
-	};
+	struct loop_context context;
+	struct loop_context *ctx = &context;
 
 	sa.sa_sigaction = signal_handler;
 	sa.sa_flags = SA_SIGINFO;
 	if (sigaction(SIGINT, &sa, NULL) == FAILURE) {
-		syslog(LOG_ERR, "%s: failed to install signal handler: %m",
-		       __func__);
+		syslog(LOG_ERR, "%s: failed to install signal handler: %m", __func__);
 		return FAILURE;
 	}
 
-	while (!disconnect) {
-		ggio.gctl_data = buf;
-		ggio.gctl_length = sizeof buf;
-		ggio.gctl_error = 0;
+	init_ctx(ctx, ggate, nbd);
 
-		result = ggate_context_ioctl(ggate, G_GATE_CMD_START, &ggio);
-		if (result == FAILURE)
-			goto fail;
+	for (;;) {
+		if (disconnect) {
+			nbd_client_set_disconnect(ctx->nbd, true);
+			ggate_context_cancel(ggate, context.ggio.gctl_seq);
+			break;
+		}
 
-		switch (ggio.gctl_error) {
-		case SUCCESS:
+		switch (context.state) {
+		case SETUP:
+			loop_setup(ctx, &buf[0], sizeof buf);
 			break;
 
-		case ECANCELED:
+		case START:
+			loop_start(ctx);
+			break;
+
+		case DO_CMD:
+			loop_command(ctx);
+			break;
+
+		case RECV_HEADER:
+			loop_recv_header(ctx);
+			break;
+
+		case RECV_DATA:
+			loop_recv_data(ctx);
+			break;
+
+		case END_CMD:
+			loop_end_command(ctx);
+			break;
+
+		case FINISHED:
 			return SUCCESS;
 
-		case ENXIO:
+		case FAIL:
 		default:
-			syslog(LOG_ERR,
-			       "%s: ggate control operation failed: %s",
-			       __func__, strerror(ggio.gctl_error));
-			goto fail;
-		}
-
-		switch (ggio.gctl_cmd) {
-		case BIO_READ:
-			result = nbd_client_send_read(nbd, ggio.gctl_seq,
-						      ggio.gctl_offset,
-						      ggio.gctl_length);
-			break;
-
-		case BIO_WRITE:
-			result = nbd_client_send_write(nbd, ggio.gctl_seq,
-						       ggio.gctl_offset,
-						       ggio.gctl_length,
-						       sizeof buf, buf);
-			break;
-
-		case BIO_DELETE:
-			result = nbd_client_send_trim(nbd, ggio.gctl_seq,
-						      ggio.gctl_offset,
-						      ggio.gctl_length);
-			break;
-
-		case BIO_FLUSH:
-			result = nbd_client_send_flush(nbd, ggio.gctl_seq);
-			break;
-
-		default:
-			syslog(LOG_NOTICE, "%s: unsupported operation: %d",
-			       __func__, ggio.gctl_cmd);
-			result = EOPNOTSUPP;
-			break;
-		}
-
-		switch (result) {
-		case SUCCESS:
-			break;
-
-		case EOPNOTSUPP:
-			ggio.gctl_error = EOPNOTSUPP;
-			goto done;
-
-		case FAILURE:
-			syslog(LOG_ERR, "%s: nbd client error", __func__);
-			goto fail;
-
-		default:
-			syslog(LOG_ERR,
-			       "%s: unhandled nbd command result: %d",
-			       __func__, result);
-			goto fail;
-		}
-
-		result = nbd_client_recv_reply_header(nbd, &ggio.gctl_seq);
-		switch (result) {
-		case SUCCESS:
-			break;
-
-		case EINVAL:
-		{
-			char const *name;
-
-			if (ggio.gctl_cmd == BIO_DELETE) {
-				// Some servers lie about support for TRIM.
-				nbd_client_disable_trim(nbd);
-				ggio.gctl_error = EOPNOTSUPP;
-				goto done;
-			}
-			syslog(LOG_ERR,
-			       "%s: server rejected command request",
-			       __func__);
-			name = bio_cmd_string(ggio.gctl_cmd);
-			if (name == NULL)
-				syslog(LOG_DEBUG, "\tcommand: %u (unknown)",
-				       ggio.gctl_cmd);
-			else
-				syslog(LOG_DEBUG, "\tcommand: %s", name);
-			syslog(LOG_DEBUG, "\toffset: %lx (%ld)",
-			       ggio.gctl_offset, ggio.gctl_offset);
-			syslog(LOG_DEBUG, "\tlength: %lx (%lu)",
-			       ggio.gctl_length, ggio.gctl_length);
-			goto fail;
-		}
-
-		default:
-			if (disconnect)
-				return SUCCESS;
-			syslog(LOG_ERR, "%s: error receiving reply header",
-			       __func__);
-			goto fail;
-		}
-
-		if (ggio.gctl_cmd != BIO_READ)
-			goto done;
-
-		result = nbd_client_recv_reply_data(nbd, ggio.gctl_length,
-						    sizeof buf, buf);
-		if (result == FAILURE) {
-			if (disconnect)
-				return SUCCESS;
-			syslog(LOG_ERR, "%s: error receiving reply data",
-			       __func__);
-			goto fail;
-		}
-
-	done:
-		result = ggate_context_ioctl(ggate, G_GATE_CMD_DONE, &ggio);
-		if (result == FAILURE) {
-			syslog(LOG_ERR, "%s: could not complete transaction",
-			       __func__);
-			goto fail;
-		}
-
-		switch (ggio.gctl_error) {
-		case SUCCESS:
-		case EOPNOTSUPP:
-			break;
-
-		case ECANCELED:
-			return SUCCESS;
-
-		case ENXIO:
-		default:
-			syslog(LOG_ERR,
-			       "%s: ggate control operation failed: %s",
-			       __func__, strerror(ggio.gctl_error));
-			goto fail;
+			ggate_context_cancel(ggate, context.ggio.gctl_seq);
+			return FAILURE;
 		}
 	}
 
 	return SUCCESS;
-
- fail:
-	ggate_context_cancel(ggate, ggio.gctl_seq);
-	return FAILURE;
 }
 
 #ifdef HAVE_LIBCASPER
