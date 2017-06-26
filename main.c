@@ -124,6 +124,8 @@ loop_setup(struct loop_context *ctx,
 		   uint8_t *buf, size_t buflen)
 {
 
+	ctx->buf = buf;
+	ctx->buflen = buflen;
 	ctx->ggio.gctl_data = buf;
 	ctx->ggio.gctl_length = buflen;
 	ctx->ggio.gctl_error = 0;
