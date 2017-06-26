@@ -420,7 +420,7 @@ main(int argc, char *argv[])
 	 * Create the nbd device.
 	 */
 
-	if (ggate_context_create_device(ggate, host, NBD_DEFAULT_PORT, "",
+	if (ggate_context_create_device(ggate, host, port, "",
 					size, DEFAULT_SECTOR_SIZE,
 					DEFAULT_GGATE_FLAGS) == FAILURE) {
 		syslog(LOG_ERR, "%s:failed to create ggate device", __func__);
