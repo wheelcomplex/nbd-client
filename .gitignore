@@ -1,0 +1,5 @@
+nbd-client
+*.o
+*.debug
+*.full
+.depend*
