@@ -93,7 +93,6 @@ struct loop_context {
 	struct g_gate_ctl_io ggio;
 	uint8_t *buf;
 	size_t buflen;
-	int result;
 };
 
 static inline enum loop_state
