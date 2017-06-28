@@ -98,7 +98,8 @@ struct loop_context {
 static inline enum loop_state
 loop_init(struct loop_context *ctx,
 	  ggate_context_t ggate,
-	  nbd_client_t nbd)
+	  nbd_client_t nbd,
+	  uint8_t *buf, size_t buflen)
 {
 
 	ctx->ggate = ggate;
@@ -107,21 +108,18 @@ loop_init(struct loop_context *ctx,
 		.gctl_version = G_GATE_VERSION,
 		.gctl_unit = ggate_context_get_unit(ggate),
 	};
-	ctx->buf = NULL;
-	ctx->buflen = 0;
+        ctx->buf = buf;
+        ctx->buflen = buflen;
 
 	return SETUP;
 }
 
 static inline enum loop_state
-loop_setup(struct loop_context *ctx,
-	   uint8_t *buf, size_t buflen)
+loop_setup(struct loop_context *ctx)
 {
 
-	ctx->buf = buf;
-	ctx->buflen = buflen;
-	ctx->ggio.gctl_data = buf;
-	ctx->ggio.gctl_length = buflen;
+	ctx->ggio.gctl_data = ctx->buf;
+	ctx->ggio.gctl_length = ctx->buflen;
 	ctx->ggio.gctl_error = 0;
 
 	return START;
@@ -347,7 +345,7 @@ run_loop(ggate_context_t ggate, nbd_client_t nbd)
 	}
 
 	ctx = &context;
-	current_state = loop_init(ctx, ggate, nbd);
+	current_state = loop_init(ctx, ggate, nbd, &buf[0], sizeof buf);
 
 	for (;;) {
 		if (disconnect) {
@@ -358,7 +356,7 @@ run_loop(ggate_context_t ggate, nbd_client_t nbd)
 
 		switch (current_state) {
 		case SETUP:
-			current_state = loop_setup(ctx, &buf[0], sizeof buf);
+			current_state = loop_setup(ctx);
 			break;
 
 		case START:
